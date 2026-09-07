@@ -13,15 +13,10 @@ extern WebServer server; // declarado en el .ino principal
 // PAGINA HTML - /devices
 // ============================================
 // La pagina /devices NO contiene datos de dispositivos en el HTML inicial
-// (se rellena via fetch('/api/devices') desde el JS). Eso permite servirla
-// desde una cache en RAM, evitando regenerar ~11KB de String concatenado en
-// CADA peticion - antes eso bloqueaba al nucleo principal ~50-100ms por cada
-// click en el menu, dando la sensacion de "se abre muy lento".
+// (se rellena via fetch('/api/devices') desde el JS). Por eso se cachea a
+// nivel de ruta (ver server.on("/devices", ...) en deviceManagerWebBegin) en
+// vez de regenerar ~11KB de String concatenado en cada peticion.
 String getDevicesPage() {
-    static String cached;
-    static bool ready = false;
-    if (ready) return cached;
-
     String page;
     page.reserve(11000);
 
@@ -193,6 +188,7 @@ String getDevicesPage() {
     page += "html+=\"<button class='toggle\"+(d.state?' on':'')+\"' onclick='event.stopPropagation();toggleDevice(\\\"\"+d.id+\"\\\")'><span class='dot'></span></button></div>\";";
     page += "html+=\"<div class='badges'><span class='badge \"+d.type+\"'>\"+d.type+\"</span>\";";
     page += "if(!d.online){html+=\"<span class='badge' style='background:rgba(239,68,68,.15);color:var(--red)'>⚠️ Sin conexión</span>\";}";
+    page += "if(d.manualOverride){html+=\"<span class='badge' style='background:rgba(59,130,246,.15);color:var(--accent2)'>🖐️ Control manual</span>\";}";
     page += "if(d.scheduleEnabled){html+=\"<span class='badge' style='background:rgba(59,130,246,.15);color:var(--accent2)'>⏰ \"+pad(d.onHour)+':'+pad(d.onMin)+'-'+pad(d.offHour)+':'+pad(d.offMin)+\"</span>\";}";
     page += "if(d.atsMode>0){html+=\"<span class='badge ats'>⚡ \"+ATS_LABEL[d.atsMode]+\"</span>\";}";
     page += "html+=\"</div>\";";
@@ -309,6 +305,7 @@ void apiDevicesList() {
         o["metricsValid"] = devices[i].metricsValid;
         o["metricsAgeSec"] = devices[i].lastMetricsUpdate == 0 ? 9999 : (millis() - devices[i].lastMetricsUpdate) / 1000;
         o["online"] = devices[i].pollFailures < 3;
+        o["manualOverride"] = millis() < devices[i].manualOverrideUntil;
     }
     xSemaphoreGive(devicesMutex);
     String out;
@@ -423,6 +420,8 @@ void apiDeviceToggle() {
     if (idx >= 0 && ok) {
         logDeviceEvent(name, newState, "Manual");
         devices[idx].state = newState;
+        devices[idx].expectedState = newState;
+        devices[idx].manualOverrideUntil = millis() + MANUAL_OVERRIDE_WINDOW_MS;
     }
     xSemaphoreGive(devicesMutex);
 

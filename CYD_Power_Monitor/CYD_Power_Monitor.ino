@@ -600,7 +600,7 @@ void pzemTaskBegin() {
         "pzem",
         4096,           // stack suficiente para Modbus + lib PZEM
         NULL,
-        1,              // prioridad baja: no debe抢占 al nucleo principal
+        1,              // prioridad baja: no debe competir con el nucleo principal
         &pzemTaskHandle,
         0               // Core 0
     );
@@ -1106,7 +1106,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 <div class='card'>
 <div class='card-header'>
 <h2>🔄 ATS Transfer Switch</h2>
-<span class='status-badge ')rawliteral");
+<span id='ats_badge' class='status-badge ')rawliteral");
     if (atsState == ATS_UTILITY_POWER) page += F("status-online'>RED ELÉCTRICA");
     else if (atsState == ATS_GENERATOR_POWER) page += F("status-badge' style='background:rgba(245,158,11,0.15);color:var(--orange)'>GENERADOR");
     else page += F("status-offline'>DESCONOCIDO");
@@ -1114,7 +1114,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 </div>
 <div class='card-body'>
 <div class='ats-panel'>
-<div class='ats-state )rawliteral");
+<div id='ats_state' class='ats-state )rawliteral");
     if (atsState == ATS_UTILITY_POWER) page += F("utility'>RED ELÉCTRICA");
     else if (atsState == ATS_GENERATOR_POWER) page += F("generator'>GENERADOR");
     else page += F("unknown'>DESCONOCIDO");
@@ -1240,6 +1240,17 @@ function refresh(){
     if(ub)ub.style.width=a.utilPct.toFixed(1)+'%';
     if(gb)gb.style.width=a.genPct.toFixed(1)+'%';
     set('v_upct',a.utilPct.toFixed(1)+'%');set('v_gpct',a.genPct.toFixed(1)+'%');
+    var badge=document.getElementById('ats_badge'),st=document.getElementById('ats_state');
+    if(a.state==='UTILITY'){
+      if(badge){badge.className='status-badge status-online';badge.textContent='RED ELÉCTRICA';badge.removeAttribute('style');}
+      if(st){st.className='ats-state utility';st.textContent='RED ELÉCTRICA';}
+    }else if(a.state==='GENERATOR'){
+      if(badge){badge.className='status-badge';badge.setAttribute('style','background:rgba(245,158,11,0.15);color:var(--orange)');badge.textContent='GENERADOR';}
+      if(st){st.className='ats-state generator';st.textContent='GENERADOR';}
+    }else{
+      if(badge){badge.className='status-badge status-offline';badge.textContent='DESCONOCIDO';badge.removeAttribute('style');}
+      if(st){st.className='ats-state unknown';st.textContent='DESCONOCIDO';}
+    }
     set('lastUpdate','Última actualización: '+new Date().toLocaleTimeString());
   }).catch(()=>{});
 }
