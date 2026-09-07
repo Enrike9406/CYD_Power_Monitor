@@ -1,0 +1,52 @@
+name: Compilar firmware CYD Power Monitor
+
+on:
+  push:
+    paths:
+      - 'CYD_Power_Monitor/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el codigo del repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Configurar arduino-cli (indice de placas ESP32)
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Instalar el core de ESP32
+        run: arduino-cli core install esp32:esp32
+
+      - name: Instalar librerias necesarias
+        run: |
+          arduino-cli lib install "WiFiManager"
+          arduino-cli lib install "ArduinoJson"
+          arduino-cli lib install "TFT_eSPI"
+          arduino-cli lib install "PZEM004Tv30"
+
+      - name: Configurar TFT_eSPI para la placa CYD2USB
+        run: |
+          curl -sL "https://raw.githubusercontent.com/witnessmenow/ESP32-Cheap-Yellow-Display/main/DisplayConfig/CYD2USB/User_Setup.h" \
+            -o "$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
+
+      - name: Compilar el sketch
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
+            --export-binaries \
+            CYD_Power_Monitor
+
+      - name: Subir el .bin compilado como artefacto descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-cyd-power-monitor
+          path: CYD_Power_Monitor/build/esp32.esp32.esp32/*.bin
+          retention-days: 30
