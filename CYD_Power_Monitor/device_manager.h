@@ -546,7 +546,7 @@ void enforceAtsAutomation() {
     int idx = findDeviceIndexById(targetId);
     if (idx >= 0) {
         if (ok) {
-            if (devices[idx].state != desired) logDeviceEvent(devices[idx].name, desired, "AutomatizaciÃ³n ATS");
+            if (devices[idx].state != desired) logDeviceEvent(devices[idx].name, desired, "Automatización ATS");
             devices[idx].state = desired;
             devices[idx].consecutiveFailures = 0;
         } else {
