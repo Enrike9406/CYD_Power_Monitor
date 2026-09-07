@@ -12,7 +12,16 @@ extern WebServer server; // declarado en el .ino principal
 // ============================================
 // PAGINA HTML - /devices
 // ============================================
+// La pagina /devices NO contiene datos de dispositivos en el HTML inicial
+// (se rellena via fetch('/api/devices') desde el JS). Eso permite servirla
+// desde una cache en RAM, evitando regenerar ~11KB de String concatenado en
+// CADA peticion - antes eso bloqueaba al nucleo principal ~50-100ms por cada
+// click en el menu, dando la sensacion de "se abre muy lento".
 String getDevicesPage() {
+    static String cached;
+    static bool ready = false;
+    if (ready) return cached;
+
     String page;
     page.reserve(11000);
 
@@ -520,7 +529,20 @@ void apiDeviceEvents() {
 }
 
 void deviceManagerWebBegin() {
-    server.on("/devices", []() { server.send(200, "text/html", getDevicesPage()); });
+    server.on("/devices", []() {
+        // La pagina de /devices NO depende de los dispositivos concretos - el
+        // JS hace fetch a /api/devices y rellena la grid. Asi que la cacheamos
+        // una sola vez en RAM y la enviamos directamente. Antes, cada GET
+        // reconstruia ~11KB de HTML via concatenacion, que ademas reventaba
+        // varios String temporales y fragmentaba la heap.
+        static String cachedPage;
+        static bool cached = false;
+        if (!cached) {
+            cachedPage = getDevicesPage();
+            cached = true;
+        }
+        server.send(200, "text/html", cachedPage);
+    });
     server.on("/api/devices", HTTP_GET, apiDevicesList);
     server.on("/api/devices/add", HTTP_POST, apiDeviceAdd);
     server.on("/api/devices/update", HTTP_POST, apiDeviceUpdate);
@@ -532,3 +554,4 @@ void deviceManagerWebBegin() {
     server.on("/api/settime", HTTP_POST, apiSetTime);
     server.on("/api/deviceevents", HTTP_GET, apiDeviceEvents);
 }
+

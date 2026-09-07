@@ -43,7 +43,7 @@
 #define DISPLAY_WIDTH 320
 #define DISPLAY_HEIGHT 240
 #define DISPLAY_ORIENTATION 1
-#define DISPLAY_UPDATE_INTERVAL 1000
+#define DISPLAY_UPDATE_INTERVAL 1500
 #define PZEM_RX_PIN 27
 #define PZEM_TX_PIN 22
 #define PZEM_BAUD_RATE 9600
@@ -530,28 +530,80 @@ bool pzemBegin() {
     return false;
 }
 
+// Lectura "rapida" para el JSON API: devuelve los ultimos valores cacheados en
+// pzemData (siempre que sean validos). El PZEM real corre en su propia tarea
+// (ver pzemTaskBegin / pzemTaskEntry abajo) para no bloquear ni la pantalla ni
+// el servidor web. Esta funcion existe para mantener el resto del codigo que
+// la llamaba sin cambios.
 bool pzemRead() {
     if (!pzemInitialized) return false;
+    if (!pzemData.isValid) return false;
+    return true;
+}
+
+// Lectura "fresca" usada SOLO desde la tarea dedicada al PZEM. Hace las 6
+// transacciones Modbus una tras otra. Cada una tarda ~300ms en baudrate 9600
+// (timeout del PZEM004Tv30); en total bloquea 1.5-2s. Por eso vive en su
+// propia tarea: mientras tanto, el nucleo principal (pantalla + web) corre
+// sin ser interrumpido. Devuelve true si todas las lecturas principales son
+// validas (no NaN). Tambien cachea el timestamp en pzemData.lastRead.
+static bool pzemReadBlocking() {
     float voltage = pzem.voltage();
     float current = pzem.current();
-    float power = pzem.power();
-    float energy = pzem.energy();
+    float power   = pzem.power();
+    float energy  = pzem.energy();
     float frequency = pzem.frequency();
-    float pf = pzem.pf();
-    
+    float pf      = pzem.pf();
+
     if (!isnan(voltage) && !isnan(current) && !isnan(power)) {
-        pzemData.voltage = voltage;
-        pzemData.current = current;
-        pzemData.power = power;
-        pzemData.energy = energy;
+        pzemData.voltage   = voltage;
+        pzemData.current   = current;
+        pzemData.power     = power;
+        pzemData.energy    = energy;
         pzemData.frequency = frequency;
-        pzemData.pf = pf;
-        pzemData.isValid = true;
-        pzemData.lastRead = millis();
+        pzemData.pf        = pf;
+        pzemData.isValid   = true;
+        pzemData.lastRead  = millis();
         return true;
     }
     pzemData.isValid = false;
     return false;
+}
+
+// Tarea FreeRTOS dedicada al PZEM, corre en Core 0 para no molestar al
+// nucleo principal (Core 1, donde estan TFT y WebServer). Duerme en bloque
+// usando vTaskDelay entre lecturas para no quemar CPU.
+static void pzemTaskEntry(void* arg) {
+    unsigned long lastRead = 0;
+    for (;;) {
+        unsigned long now = millis();
+        if (pzemInitialized && (now - lastRead) >= PZEM_READ_INTERVAL) {
+            lastRead = now;
+            bool ok = pzemReadBlocking();
+            // Guardamos el estado para que el JSON API y la UI lo lean
+            // sin tener que tocar Serial2 ellos mismos.
+            if (ok) {
+                pzemStatusStr = "PZEM: OK";
+            } else {
+                pzemStatusStr = "PZEM: ERR";
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static TaskHandle_t pzemTaskHandle = NULL;
+void pzemTaskBegin() {
+    if (pzemTaskHandle != NULL) return;
+    xTaskCreatePinnedToCore(
+        pzemTaskEntry,
+        "pzem",
+        4096,           // stack suficiente para Modbus + lib PZEM
+        NULL,
+        1,              // prioridad baja: no debe抢占 al nucleo principal
+        &pzemTaskHandle,
+        0               // Core 0
+    );
 }
 
 String pzemGetStatusString() {
@@ -756,17 +808,30 @@ void displayUpdate() {
     displayDrawPZEMData();
     displayDrawATSStatus();
 
-    // Footer: borrar y redibujar (cambia WiFi/PZEM status)
-    displayDrawFooter(wifiStatusStr, pzemStatusStr);
+    // Footer: solo redibujar si las cadenas cambiaron (antes se redibujaba
+    // siempre, lo que provocaba flicker visible en la franja inferior)
+    static String lastWifi = "";
+    static String lastPzem = "";
+    if (wifiStatusStr != lastWifi || pzemStatusStr != lastPzem) {
+        displayDrawFooter(wifiStatusStr, pzemStatusStr);
+        lastWifi = wifiStatusStr;
+        lastPzem = pzemStatusStr;
+    }
 
-    // LDR — borrar solo el área del valor
-    int ldrValue = analogRead(LDR_PIN);
-    tft.fillRect(250, 7, 68, 12, COLOR_BLUE);
-    tft.setTextColor(COLOR_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(250, 7);
-    tft.print("LDR:");
-    tft.print(ldrValue);
+    // LDR — solo se imprime a veces para evitar parpadeo. Leemos un valor
+    // suavizado del propio módulo de auto-brillo (que ya promedia varias
+    // muestras) para no introducir más ruido en pantalla.
+    static unsigned long ldrLastPrint = 0;
+    if (now - ldrLastPrint >= 3000) {
+        ldrLastPrint = now;
+        int ldrValue = analogRead(LDR_PIN);
+        tft.fillRect(250, 7, 68, 12, COLOR_BLUE);
+        tft.setTextColor(COLOR_WHITE);
+        tft.setTextSize(1);
+        tft.setCursor(250, 7);
+        tft.print("LDR:");
+        tft.print(ldrValue);
+    }
 }
 
 void displayShowMessage(const String& message, int duration) {
@@ -2120,7 +2185,9 @@ void setup() {
     // PZEM
     pzemInitialized = pzemBegin();
     pzemStatusStr = pzemGetStatusString();
-    
+    // Tarea dedicada en Core 0 para no bloquear la pantalla ni el webserver
+    pzemTaskBegin();
+
     // WiFi
     setLED(false, false, true);  // Blue = connecting
     wifiSetup();
@@ -2170,21 +2237,10 @@ void loop() {
     // Check boot button for WiFi reset
     checkBootButton();
     
-    // Read PZEM sensor
-    if (now - pzemLastRead >= PZEM_READ_INTERVAL) {
-        pzemLastRead = now;
-        if (pzemRead()) {
-            pzemStatusStr = "PZEM: OK";
-            setLED(false, true, false);  // Green = all good
-        } else {
-            pzemStatusStr = "PZEM: ERR";
-            // Only blink red if ATS is also on generator (double problem indicator)
-            if (atsState == ATS_GENERATOR_POWER) {
-                setLED(true, false, false);
-            }
-        }
-    }
-    
+    // La lectura del PZEM corre en su propia tarea en Core 0 (ver pzemTaskBegin
+    // en setup). Aqui solo actualizamos el LED de estado con throttling para
+    // no flicker y para no hacer un digitalWrite en cada iteracion del loop.
+
     // Update ATS state
     atsUpdate();
     
@@ -2199,12 +2255,27 @@ void loop() {
     // deviceManagerTaskBegin() en setup()), para que nunca bloqueen la
     // pantalla ni el servidor web de este nucleo.
     
-    // Update LED based on ATS state
-    if (pzemData.isValid) {
-        switch (atsState) {
-            case ATS_UTILITY_POWER:   setLED(false, true, false);  break;  // Green = utility
-            case ATS_GENERATOR_POWER: setLED(false, false, true);  break;  // Blue  = generator (changed from orange since no orange LED)
-            default:                  setLED(true, false, false);  break;  // Red   = unknown
+    // Update LED based on ATS state (throttled a 500ms para no martillear
+    // los pines y para que los cambios de estado sean visibles a ojos)
+    static unsigned long ledLastUpdate = 0;
+    static int lastLedCode = -1;
+    if (now - ledLastUpdate >= 500) {
+        ledLastUpdate = now;
+        int code = 0; // 0=utility, 1=generator, 2=unknown/error
+        if (!pzemData.isValid) {
+            code = 2;
+        } else {
+            switch (atsState) {
+                case ATS_UTILITY_POWER:   code = 0; break;
+                case ATS_GENERATOR_POWER: code = 1; break;
+                default:                  code = 2; break;
+            }
+        }
+        if (code != lastLedCode) {
+            lastLedCode = code;
+            if (code == 0)      setLED(false, true, false);   // Green
+            else if (code == 1) setLED(false, false, true);   // Blue
+            else                setLED(true, false, false);   // Red
         }
     }
     
