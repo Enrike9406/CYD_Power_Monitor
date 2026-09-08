@@ -3,11 +3,7 @@ name: Compilar firmware CYD Power Monitor
 on:
   push:
     paths:
-      - 'CYD_Power_Monitor.ino'
-      - 'device_manager.h'
-      - 'device_pages.h'
-      - 'data/**'
-      - 'convert_image.py'
+      - 'CYD_Power_Monitor/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -48,7 +44,7 @@ jobs:
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
             --export-binaries \
-            .
+            CYD_Power_Monitor
 
       - name: Subir el .bin compilado como artefacto descargable
         uses: actions/upload-artifact@v4
