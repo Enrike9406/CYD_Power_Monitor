@@ -4,6 +4,12 @@
  * Proyecto para CYD2USB (ESP32-2432S028) que monitorea un PZEM-004T 
  * y el estado de un ATS (Automatic Transfer Switch).
  * 
+ * v2.2 - Correccion de renderizado TFT y layout de pantalla CYD
+ *   - Corrige caracteres/digitos deformados causados por usar la fuente 2 como fuente global
+ *   - Usa fuente 1 (font 1) de TFT_eSPI como base estable y legible
+ *   - Evita que la hora toque la linea verde del encabezado
+ *   - Centrado de valores sin asumir anchos fijos de fuente
+ *
  * v2.1 - Professional industrial dashboard redesign
  *   - Modern industrial web dashboard with real-time charts
  *   - Detailed ATS history with statistics and visual timeline
@@ -59,7 +65,7 @@
 #define DEBUG_BAUD_RATE 115200
 #define WEB_REFRESH_INTERVAL 5
 #define BOOT_RESET_HOLD_TIME 5000
-#define FIRMWARE_VERSION "2.1"
+#define FIRMWARE_VERSION "2.2"
 #define MAX_HISTORY_ENTRIES 300
 #define HISTORY_SAVE_INTERVAL 60000
 #define SCHEDULER_CHECK_INTERVAL 3000
@@ -631,7 +637,15 @@ bool displayBegin() {
     tft.writedata(1);
     
     tft.fillScreen(COLOR_BG);
-    tft.setTextFont(2);
+
+    // Font 1 es la fuente bitmap base de TFT_eSPI. Evitamos usar font 2
+    // como fuente global porque en algunas configuraciones CYD/TFT_eSPI
+    // la combinacion font 2 + setTextSize() produce caracteres deformados.
+    tft.setTextFont(1);
+    tft.setTextSize(1);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextWrap(false);
+
     displayInitialized = true;
     Serial.println("Display initialized (CYD2USB gamma fix applied)");
     return true;
@@ -640,6 +654,7 @@ bool displayBegin() {
 // Cabecera: hora real (o uptime si no hay hora aun) a la izquierda,
 // punto de estado WiFi + fecha a la derecha.
 void displayDrawHeader() {
+    // Encabezado limpio: la hora queda dentro de los primeros 24 px.
     tft.fillRect(0, 0, DISPLAY_WIDTH, HEADER_HEIGHT, COLOR_BG);
     tft.fillRect(0, HEADER_HEIGHT - 2, DISPLAY_WIDTH, 2, COLOR_GREEN);
 
@@ -647,6 +662,7 @@ void displayDrawHeader() {
     char timeBuf[10] = "--:--";
     char dateBuf[12] = "";
     bool hasTime = (nowEpoch > 100000);
+
     if (hasTime) {
         struct tm ti;
         localtime_r(&nowEpoch, &ti);
@@ -654,14 +670,15 @@ void displayDrawHeader() {
         strftime(dateBuf, sizeof(dateBuf), "%d %b", &ti);
     }
 
+    tft.setTextFont(1);
+    tft.setTextSize(2);
     tft.setTextColor(COLOR_CYAN);
-    tft.setTextSize(3);
     tft.setCursor(8, 2);
     tft.print(timeBuf);
 
-    // Punto de estado WiFi (verde=conectado, rojo=no) en vez de icono
     bool wifiOk = (WiFi.status() == WL_CONNECTED);
-    tft.fillCircle(DISPLAY_WIDTH - 70, 12, 5, wifiOk ? COLOR_GREEN : COLOR_RED);
+    tft.fillCircle(DISPLAY_WIDTH - 70, 12, 5,
+                   wifiOk ? COLOR_GREEN : COLOR_RED);
 
     tft.setTextSize(1);
     tft.setTextColor(COLOR_WHITE);
@@ -672,7 +689,10 @@ void displayDrawHeader() {
 // Ancho fijo por caracter para borrar/redibujar solo la zona de un valor,
 // evitando parpadeo en el numero grande del centro del medidor.
 void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t color) {
-    tft.fillRect(x, y, clearW, 14, COLOR_BG);
+    tft.setTextFont(1);
+    tft.setTextSize(1);
+    tft.setTextDatum(TL_DATUM);
+    tft.fillRect(x, y, clearW, 10, COLOR_CARD);
     tft.setTextColor(color);
     tft.setCursor(x, y);
     tft.print(val);
@@ -686,12 +706,8 @@ void displayDrawGauge() {
     const int cy = 108;
     const int rOuter = 78;
     const int rInner = 62;
-    // TFT_eSPI mide angulos desde las 6 en punto (abajo), sentido horario, y
-    // los recorta en 0-360 (no da la vuelta). 45->315 = barrido de 270 grados
-    // pasando por arriba, con el hueco del medidor abajo (igual que las fotos
-    // de referencia), sin pasarse nunca de 360.
     const int startAngle = 45;
-    const int sweepAngle = 270; // 45 + 270 = 315, dentro del rango valido
+    const int sweepAngle = 270;
 
     static bool trackDrawn = false;
     static float lastPct = -1;
@@ -699,16 +715,19 @@ void displayDrawGauge() {
     static bool lastValid = false;
 
     if (!trackDrawn) {
-        tft.drawArc(cx, cy, rOuter, rInner, startAngle, startAngle + sweepAngle, COLOR_TRACK, COLOR_BG, true);
+        tft.drawArc(cx, cy, rOuter, rInner,
+                    startAngle, startAngle + sweepAngle,
+                    COLOR_TRACK, COLOR_BG, true);
         trackDrawn = true;
     }
 
     bool valid = pzemData.isValid;
-    float watts = valid ? pzemData.power : 0;
+    float watts = valid ? pzemData.power : 0.0f;
     float pct = constrain(watts / (float)GAUGE_MAX_WATTS, 0.0f, 1.0f);
 
     uint16_t arcColor;
     String stateLabel;
+
     if (!valid) {
         arcColor = COLOR_DARK_GRAY;
         stateLabel = "SIN DATOS";
@@ -723,48 +742,52 @@ void displayDrawGauge() {
         stateLabel = "FUENTE DESCONOCIDA";
     }
 
-    // Redibuja el arco de valor solo si cambio de forma perceptible (evita
-    // parpadeo por variaciones de 1W que no se notarian visualmente igual)
-    if (fabs(pct - lastPct) > 0.01 || lastGaugeState != atsState || lastValid != valid) {
-        // Se re-dibuja el riel primero para "borrar" el arco anterior
-        tft.drawArc(cx, cy, rOuter, rInner, startAngle, startAngle + sweepAngle, COLOR_TRACK, COLOR_BG, true);
-        if (pct > 0.01) {
-            tft.drawArc(cx, cy, rOuter, rInner, startAngle, startAngle + (sweepAngle * pct), arcColor, COLOR_BG, true);
+    if (fabs(pct - lastPct) > 0.01f ||
+        lastGaugeState != atsState ||
+        lastValid != valid) {
+
+        tft.drawArc(cx, cy, rOuter, rInner,
+                    startAngle, startAngle + sweepAngle,
+                    COLOR_TRACK, COLOR_BG, true);
+
+        if (pct > 0.01f) {
+            int valueSweep = max(1, (int)(sweepAngle * pct));
+            tft.drawArc(cx, cy, rOuter, rInner,
+                        startAngle, startAngle + valueSweep,
+                        arcColor, COLOR_BG, true);
         }
+
         lastPct = pct;
         lastGaugeState = atsState;
         lastValid = valid;
     }
 
-    // Numero grande de potencia, centrado. Area de borrado FIJA (no depende
-    // del ancho del texto actual) para que un numero mas angosto borre por
-    // completo los pixeles de un numero anterior mas ancho - si no, quedan
-    // restos que se acumulan y se ven como manchas/bloques.
+    // Potencia: centrado real mediante datum MC, sin calcular manualmente
+    // el ancho de cada caracter.
     String wattsStr = valid ? String((int)watts) : String("--");
+
+    tft.setTextFont(1);
     tft.setTextSize(3);
-    const int NUM_AREA_W = 160; // cubre hasta 5 digitos holgadamente
-    const int NUM_AREA_X = cx - NUM_AREA_W / 2;
-    tft.fillRect(NUM_AREA_X, cy - 22, NUM_AREA_W, 24, COLOR_BG);
-    int textW = wattsStr.length() * 18;
+    tft.setTextDatum(MC_DATUM);
     tft.setTextColor(COLOR_WHITE);
-    tft.setCursor(cx - textW / 2, cy - 22);
-    tft.print(wattsStr);
+    tft.fillRect(cx - 82, cy - 28, 164, 34, COLOR_BG);
+    tft.drawString(wattsStr, cx - 5, cy - 10);
+
     tft.setTextSize(1);
     tft.setTextColor(COLOR_CYAN);
-    tft.setCursor(cx + textW / 2 - 8, cy - 6);
-    tft.print("W");
+    tft.drawString("W", cx + 43, cy - 9);
 
-    // Estado del ATS, centrado debajo del numero
     static String lastLabel = "";
     if (stateLabel != lastLabel) {
-        tft.fillRect(cx - 75, cy + 14, 150, 12, COLOR_BG);
+        tft.fillRect(cx - 80, cy + 12, 160, 16, COLOR_BG);
+        tft.setTextFont(1);
         tft.setTextSize(1);
         tft.setTextColor(arcColor);
-        int labelW = stateLabel.length() * 6;
-        tft.setCursor(cx - labelW / 2, cy + 16);
-        tft.print(stateLabel);
+        tft.drawString(stateLabel, cx, cy + 20);
         lastLabel = stateLabel;
     }
+
+    tft.setTextDatum(TL_DATUM);
 }
 
 // Dos tarjetas inferiores estilo "smart home": Voltaje/Corriente a la
@@ -792,6 +815,8 @@ void displayDrawTiles() {
     }
 
     // Tile izquierda: voltaje + corriente
+    tft.setTextFont(1);
+    tft.setTextSize(1);
     String vaStr = pzemData.isValid
         ? (String(pzemData.voltage, 0) + "V  " + String(pzemData.current, 1) + "A")
         : String("-- V  -- A");
@@ -800,8 +825,9 @@ void displayDrawTiles() {
     // Tile derecha: punto de color + fuente + tiempo en ese estado
     uint16_t dotColor = (atsState == ATS_UTILITY_POWER) ? COLOR_GREEN :
                          (atsState == ATS_GENERATOR_POWER) ? COLOR_ORANGE : COLOR_RED;
-    tft.fillRect(rightX + 8, tileY + 22, 90, 12, COLOR_CARD); // borra circulo+texto previos
+    tft.fillRect(rightX + 8, tileY + 20, 135, 16, COLOR_CARD); // limpia valor anterior
     tft.fillCircle(rightX + 13, tileY + 27, 4, dotColor);
+    tft.setTextFont(1);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_WHITE);
     tft.setCursor(rightX + 22, tileY + 22);
