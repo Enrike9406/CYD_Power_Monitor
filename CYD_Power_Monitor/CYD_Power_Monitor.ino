@@ -828,7 +828,7 @@ void displayDrawBackground() {
     TJpgDec.setSwapBytes(true);  // ILI9341 requiere swap de bytes
 
     // Dibujar imagen a pantalla completa (320x240)
-    bool jpgOk = TJpgDec.drawJpgFile(SPIFFS, BG_IMAGE_PATH, 0, 0);
+    bool jpgOk = TJpgDec.drawJpg(0, 0, SPIFFS, BG_IMAGE_PATH);
     jpgFile.close();
 
     if (!jpgOk) {
