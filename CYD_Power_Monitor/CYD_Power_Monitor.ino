@@ -30,7 +30,11 @@
 #include <WebServer.h>
 #include <Update.h>
 #include <ArduinoJson.h>
+
+// Habilitar soporte de decodificación JPEG en TFT_eSPI
+#define TFT_JPEG_LOAD
 #include <TFT_eSPI.h>
+#include <TJpg_Decoder.h>
 #include <PZEM004Tv30.h>
 #include <SPIFFS.h>
 
@@ -132,9 +136,9 @@ const uint16_t COLOR_BLUE = 0x001F;
 const uint16_t COLOR_CYAN = 0x07FF;
 const uint16_t COLOR_ORANGE = 0xFD20;
 const uint16_t COLOR_DARK_GRAY = 0x7BEF;
-const uint16_t COLOR_CARD = 0x18C3;      // fondo de tarjetas (mismo tono que el resto del proyecto)
-const uint16_t COLOR_TRACK = 0x2965;     // "riel" tenue del arco cuando no hay valor
-const uint16_t COLOR_MUTED = 0x9CD3;     // gris azulado para texto secundario
+const uint16_t COLOR_DATA_BG = 0x18C3;  // Fondo oscuro para áreas de datos (overlay)
+
+#define BG_IMAGE_PATH "/mi_home.jpg"
 
 const int HEADER_HEIGHT = 25;
 const int FOOTER_HEIGHT = 20;
@@ -142,7 +146,6 @@ const int COL1_X = 5;
 const int COL2_X = 165;
 const int ROW_Y_START = 30;
 const int ROW_HEIGHT = 22;
-const int GAUGE_MAX_WATTS = 3000; // escala del arco - ajustable segun tu instalacion
 
 // ============================================
 // BOOT BUTTON
@@ -637,167 +640,211 @@ bool displayBegin() {
     return true;
 }
 
-// Cabecera: hora real (o uptime si no hay hora aun) a la izquierda,
-// punto de estado WiFi + fecha a la derecha.
 void displayDrawHeader() {
-    tft.fillRect(0, 0, DISPLAY_WIDTH, HEADER_HEIGHT, COLOR_BG);
-    tft.fillRect(0, HEADER_HEIGHT - 2, DISPLAY_WIDTH, 2, COLOR_GREEN);
-
-    time_t nowEpoch = time(nullptr);
-    char timeBuf[10] = "--:--";
-    char dateBuf[12] = "";
-    bool hasTime = (nowEpoch > 100000);
-    if (hasTime) {
-        struct tm ti;
-        localtime_r(&nowEpoch, &ti);
-        strftime(timeBuf, sizeof(timeBuf), "%H:%M", &ti);
-        strftime(dateBuf, sizeof(dateBuf), "%d %b", &ti);
-    }
-
+    tft.fillRect(0, 0, DISPLAY_WIDTH, HEADER_HEIGHT, COLOR_BLUE);
+    tft.fillRect(0, HEADER_HEIGHT - 3, DISPLAY_WIDTH, 3, COLOR_CYAN);
     tft.setTextColor(COLOR_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(8, 4);
-    tft.print(timeBuf);
-
-    // Punto de estado WiFi (verde=conectado, rojo=no) en vez de icono
-    bool wifiOk = (WiFi.status() == WL_CONNECTED);
-    tft.fillCircle(DISPLAY_WIDTH - 78, 12, 5, wifiOk ? COLOR_GREEN : COLOR_RED);
-
     tft.setTextSize(1);
-    tft.setTextColor(COLOR_MUTED);
-    tft.setCursor(DISPLAY_WIDTH - 62, 8);
-    tft.print(hasTime ? dateBuf : "sin hora");
+    tft.setCursor(5, 7);
+    tft.print("CYD Power Monitor v");
+    tft.print(FIRMWARE_VERSION);
+    tft.drawFastHLine(0, HEADER_HEIGHT, DISPLAY_WIDTH, COLOR_CYAN);
 }
 
-// Ancho fijo por caracter para borrar/redibujar solo la zona de un valor,
-// evitando parpadeo en el numero grande del centro del medidor.
+void displayDrawFooter(const String& wifiStatus, const String& pzemStatus) {
+    int footerY = DISPLAY_HEIGHT - FOOTER_HEIGHT;
+    tft.fillRect(0, footerY, DISPLAY_WIDTH, FOOTER_HEIGHT, 0x18C3);
+    tft.fillRect(0, footerY, DISPLAY_WIDTH, 1, COLOR_CYAN);
+    tft.setTextColor(COLOR_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(5, footerY + 5);
+    tft.print(wifiStatus);
+    tft.setCursor(165, footerY + 5);
+    tft.print(pzemStatus);
+}
+
+// Dibuja un campo: borra solo el área del valor y lo reescribe (sin parpadeo)
 void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t color) {
-    tft.fillRect(x, y, clearW, 14, COLOR_BG);
+    tft.fillRect(x, y, clearW, 14, COLOR_DATA_BG);
     tft.setTextColor(color);
     tft.setCursor(x, y);
     tft.print(val);
 }
 
-// Medidor circular central: arco de "riel" tenue de fondo + arco de valor
-// coloreado segun la fuente activa del ATS (verde=red, naranja=generador).
-// El numero grande de vatios y el estado del ATS se muestran dentro del anillo.
-void displayDrawGauge() {
-    const int cx = DISPLAY_WIDTH / 2;
-    const int cy = 108;
-    const int rOuter = 78;
-    const int rInner = 62;
-    // TFT_eSPI mide angulos desde las 6 en punto (abajo), sentido horario, y
-    // los recorta en 0-360 (no da la vuelta). 45->315 = barrido de 270 grados
-    // pasando por arriba, con el hueco del medidor abajo (igual que las fotos
-    // de referencia), sin pasarse nunca de 360.
-    const int startAngle = 45;
-    const int sweepAngle = 270; // 45 + 270 = 315, dentro del rango valido
-
-    static bool trackDrawn = false;
-    static float lastPct = -1;
-    static ATSState lastGaugeState = ATS_UNKNOWN;
-    static bool lastValid = false;
-
-    if (!trackDrawn) {
-        tft.drawArc(cx, cy, rOuter, rInner, startAngle, startAngle + sweepAngle, COLOR_TRACK, COLOR_BG, true);
-        trackDrawn = true;
-    }
-
-    bool valid = pzemData.isValid;
-    float watts = valid ? pzemData.power : 0;
-    float pct = constrain(watts / (float)GAUGE_MAX_WATTS, 0.0f, 1.0f);
-
-    uint16_t arcColor;
-    String stateLabel;
-    if (!valid) {
-        arcColor = COLOR_DARK_GRAY;
-        stateLabel = "SIN DATOS";
-    } else if (atsState == ATS_UTILITY_POWER) {
-        arcColor = COLOR_GREEN;
-        stateLabel = "RED ELECTRICA";
-    } else if (atsState == ATS_GENERATOR_POWER) {
-        arcColor = COLOR_ORANGE;
-        stateLabel = "GENERADOR";
-    } else {
-        arcColor = COLOR_RED;
-        stateLabel = "FUENTE DESCONOCIDA";
-    }
-
-    // Redibuja el arco de valor solo si cambio de forma perceptible (evita
-    // parpadeo por variaciones de 1W que no se notarian visualmente igual)
-    if (fabs(pct - lastPct) > 0.01 || lastGaugeState != atsState || lastValid != valid) {
-        // Se re-dibuja el riel primero para "borrar" el arco anterior
-        tft.drawArc(cx, cy, rOuter, rInner, startAngle, startAngle + sweepAngle, COLOR_TRACK, COLOR_BG, true);
-        if (pct > 0.01) {
-            tft.drawArc(cx, cy, rOuter, rInner, startAngle, startAngle + (sweepAngle * pct), arcColor, COLOR_BG, true);
-        }
-        lastPct = pct;
-        lastGaugeState = atsState;
-        lastValid = valid;
-    }
-
-    // Numero grande de potencia, centrado
-    String wattsStr = valid ? String((int)watts) : String("--");
-    tft.setTextSize(3);
-    int textW = wattsStr.length() * 18; // ancho aprox por caracter a size 3
-    displayPrintValue(cx - textW / 2 - 10, cy - 22, textW + 20, wattsStr, COLOR_WHITE);
+void displayDrawPZEMData() {
+    int y = ROW_Y_START;
     tft.setTextSize(1);
-    tft.setTextColor(COLOR_MUTED);
-    tft.setCursor(cx + textW / 2 - 8, cy - 6);
-    tft.print("W");
 
-    // Estado del ATS, centrado debajo del numero
-    static String lastLabel = "";
-    if (stateLabel != lastLabel) {
-        tft.fillRect(cx - 75, cy + 14, 150, 12, COLOR_BG);
+    // Título — solo se dibuja en el primer frame (no cambia)
+    // Zona de datos: borrar solo la columna de valores, no las etiquetas
+    // Primera vez o si cambia validez: redibujar etiquetas completas
+    static bool labelsDrawn = false;
+    static bool wasValid = false;
+
+    if (!labelsDrawn || wasValid != pzemData.isValid) {
+        // Borrar zona de datos completa
+        tft.fillRect(0, y, DISPLAY_WIDTH, DISPLAY_HEIGHT - FOOTER_HEIGHT - 75 - y, COLOR_DATA_BG);
+
+        // Título
+        tft.fillRect(2, y - 2, DISPLAY_WIDTH - 4, 14, 0x18C3);
+        tft.setTextColor(COLOR_YELLOW);
+        tft.setCursor(5, y);
+        tft.print("PZEM-004T Electrical Readings");
+
+        if (pzemData.isValid) {
+            float ap = (pzemData.voltage > 0 && pzemData.pf > 0) ? pzemData.power / pzemData.pf : 0;
+            int dy = y + 16;
+            // Etiquetas columna izquierda
+            tft.setTextColor(COLOR_CYAN);
+            tft.setCursor(COL1_X, dy);          tft.print("Voltage: "); dy += ROW_HEIGHT;
+            tft.setCursor(COL1_X, dy);          tft.print("Current: "); dy += ROW_HEIGHT;
+            tft.setCursor(COL1_X, dy);          tft.print("Power:   "); dy += ROW_HEIGHT;
+            tft.setCursor(COL1_X, dy);          tft.print("Energy:  ");
+            // Etiquetas columna derecha
+            dy = y + 16;
+            tft.setCursor(COL2_X, dy);          tft.print("Freq:    "); dy += ROW_HEIGHT;
+            tft.setCursor(COL2_X, dy);          tft.print("PF:      "); dy += ROW_HEIGHT;
+            tft.setCursor(COL2_X, dy);          tft.print("Apparent:"); dy += ROW_HEIGHT;
+            tft.setCursor(COL2_X, dy);          tft.print("Reactive:");
+        }
+        labelsDrawn = true;
+        wasValid = pzemData.isValid;
+    }
+
+    if (!pzemData.isValid) {
+        tft.fillRect(COL1_X, y + 16, 150, 14, COLOR_DATA_BG);
+        tft.setTextColor(COLOR_RED);
+        tft.setCursor(COL1_X, y + 16);
+        tft.print("No valid data available");
+        return;
+    }
+
+    float ap = (pzemData.voltage > 0 && pzemData.pf > 0) ? pzemData.power / pzemData.pf : 0;
+    float rp = sqrt(max(0.0f, ap * ap - pzemData.power * pzemData.power));
+
+    // Ancho fijo para borrar valores: columna izquierda 75px, derecha 70px
+    const int VW1 = 75, VW2 = 72;
+    const int VX1 = COL1_X + 54;   // offset tras etiqueta más larga "Voltage: "
+    const int VX2 = COL2_X + 54;
+
+    int dy = y + 16;
+    // Valores columna izquierda
+    displayPrintValue(VX1, dy, VW1, String(pzemData.voltage, 1) + " V",  COLOR_WHITE); dy += ROW_HEIGHT;
+    displayPrintValue(VX1, dy, VW1, String(pzemData.current, 2) + " A",  COLOR_WHITE); dy += ROW_HEIGHT;
+    displayPrintValue(VX1, dy, VW1, String(pzemData.power,   1) + " W",  COLOR_WHITE); dy += ROW_HEIGHT;
+    displayPrintValue(VX1, dy, VW1, String(pzemData.energy,  1) + " Wh", COLOR_WHITE);
+
+    dy = y + 16;
+    // Valores columna derecha
+    displayPrintValue(VX2, dy, VW2, String(pzemData.frequency, 1) + " Hz", COLOR_WHITE); dy += ROW_HEIGHT;
+    displayPrintValue(VX2, dy, VW2, String(pzemData.pf, 2),                COLOR_WHITE); dy += ROW_HEIGHT;
+    displayPrintValue(VX2, dy, VW2, String(ap, 1) + " VA",                 COLOR_WHITE); dy += ROW_HEIGHT;
+    displayPrintValue(VX2, dy, VW2, String(rp, 1) + " VAR",                COLOR_WHITE);
+}
+
+void displayDrawATSStatus() {
+    int y = DISPLAY_HEIGHT - FOOTER_HEIGHT - 70;
+    int boxWidth = DISPLAY_WIDTH - 10;
+    int boxHeight = 55;
+    int boxX = 5;
+
+    static ATSState lastAtsState = ATS_UNKNOWN;
+    static bool atsBoxDrawn = false;
+
+    uint16_t stateColor;
+    String stateText;
+    switch (atsState) {
+        case ATS_UTILITY_POWER:   stateColor = COLOR_GREEN;  stateText = "UTILITY POWER  "; break;
+        case ATS_GENERATOR_POWER: stateColor = COLOR_ORANGE; stateText = "GENERATOR POWER"; break;
+        default:                  stateColor = COLOR_RED;    stateText = "UNKNOWN        "; break;
+    }
+
+    // Dibujar caja + etiqueta fija solo la primera vez o si cambia el estado
+    if (!atsBoxDrawn || lastAtsState != atsState) {
+        tft.fillRect(boxX, y, boxWidth, boxHeight, 0x18C3);
+        tft.drawRect(boxX, y, boxWidth, boxHeight, COLOR_CYAN);
+        tft.setTextColor(COLOR_YELLOW);
         tft.setTextSize(1);
-        tft.setTextColor(arcColor);
-        int labelW = stateLabel.length() * 6;
-        tft.setCursor(cx - labelW / 2, cy + 16);
-        tft.print(stateLabel);
-        lastLabel = stateLabel;
+        tft.setCursor(boxX + 5, y + 5);
+        tft.print("ATS Transfer Switch");
+        // Indicador de color
+        tft.fillRect(boxX + 5, y + 18, 12, 12, stateColor);
+        tft.setTextColor(stateColor);
+        tft.setCursor(boxX + 22, y + 20);
+        tft.print(stateText);
+        lastAtsState = atsState;
+        atsBoxDrawn = true;
+    }
+
+    // Timer — borrar solo el área del valor y redibujar
+    tft.fillRect(boxX + 5, y + 38, 110, 14, 0x18C3);
+    tft.setTextColor(COLOR_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(boxX + 5, y + 38);
+    tft.print("Time: ");
+    tft.print(formatDuration(atsGetTimeInState()));
+
+    // Porcentajes — borrar y redibujar
+    float utilPct = atsGetPercentageInState(ATS_UTILITY_POWER);
+    float genPct  = atsGetPercentageInState(ATS_GENERATOR_POWER);
+    tft.fillRect(boxX + 120, y + 20, 185, 14, 0x18C3);
+    if (historyCount > 0 || atsGetTimeInState() > 10) {
+        tft.setTextColor(COLOR_GREEN);
+        tft.setCursor(boxX + 120, y + 20);
+        tft.print("U:"); tft.print(utilPct, 0); tft.print("% ");
+        tft.setTextColor(COLOR_ORANGE);
+        tft.print("G:"); tft.print(genPct, 0); tft.print("%");
     }
 }
 
-// Dos tarjetas inferiores estilo "smart home": Voltaje/Corriente a la
-// izquierda, estado del ATS con punto de color + tiempo en esa fuente a la
-// derecha (mismo lenguaje visual que el dashboard web).
-void displayDrawTiles() {
-    const int tileY = 196;
-    const int tileH = 40;
-    const int tileW = 150;
-    const int gap = 6;
-    const int leftX = 5;
-    const int rightX = leftX + tileW + gap;
+// ============================================
+// FONDO DE PANTALLA CON IMAGEN (mi_home.jpg)
+// ============================================
 
-    static bool tilesDrawn = false;
-    if (!tilesDrawn) {
-        tft.fillRoundRect(leftX, tileY, tileW, tileH, 6, COLOR_CARD);
-        tft.fillRoundRect(rightX, tileY, tileW, tileH, 6, COLOR_CARD);
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_MUTED);
-        tft.setCursor(leftX + 8, tileY + 5);
-        tft.print("VOLTAJE / CORRIENTE");
-        tft.setCursor(rightX + 8, tileY + 5);
-        tft.print("FUENTE ACTIVA");
-        tilesDrawn = true;
+// Callback para TJpg_Decoder: envía bloques decodificados al TFT
+bool tjpg_draw(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+    tft.pushImage(x, y, w, h, bitmap);
+    return true;
+}
+
+// Dibuja la imagen de fondo desde SPIFFS y los overlays de datos
+void displayDrawBackground() {
+    if (!SPIFFS.exists(BG_IMAGE_PATH)) {
+        Serial.println("Fondo: no se encuentra " BG_IMAGE_PATH ", usando fondo negro");
+        tft.fillScreen(COLOR_BG);
+        return;
     }
 
-    // Tile izquierda: voltaje + corriente
-    String vaStr = pzemData.isValid
-        ? (String(pzemData.voltage, 0) + "V  " + String(pzemData.current, 1) + "A")
-        : String("-- V  -- A");
-    displayPrintValue(leftX + 8, tileY + 20, tileW - 16, vaStr, COLOR_WHITE);
+    File jpgFile = SPIFFS.open(BG_IMAGE_PATH, FILE_READ);
+    if (!jpgFile) {
+        Serial.println("Fondo: no se pudo abrir " BG_IMAGE_PATH);
+        tft.fillScreen(COLOR_BG);
+        return;
+    }
 
-    // Tile derecha: punto de color + fuente + tiempo en ese estado
-    uint16_t dotColor = (atsState == ATS_UTILITY_POWER) ? COLOR_GREEN :
-                         (atsState == ATS_GENERATOR_POWER) ? COLOR_ORANGE : COLOR_RED;
-    tft.fillRect(rightX + 8, tileY + 22, 90, 12, COLOR_CARD); // borra circulo+texto previos
-    tft.fillCircle(rightX + 13, tileY + 27, 4, dotColor);
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_WHITE);
-    tft.setCursor(rightX + 22, tileY + 22);
-    tft.print(formatDuration(atsGetTimeInState()));
+    // Configurar decodificador JPEG
+    TJpgDec.setCallback(tjpg_draw);
+    TJpgDec.setJpgScale(1);
+    TJpgDec.setSwapBytes(true);  // ILI9341 requiere swap de bytes
+
+    // Dibujar imagen a pantalla completa (320x240)
+    bool jpgOk = TJpgDec.drawJpgFile(SPIFFS, BG_IMAGE_PATH, 0, 0);
+    jpgFile.close();
+
+    if (!jpgOk) {
+        Serial.println("Fondo: error decodificando JPEG, usando fondo negro");
+        tft.fillScreen(COLOR_BG);
+        return;
+    }
+
+    // Overlay oscuro para área de datos PZEM (mejora legibilidad)
+    tft.fillRect(0, 28, DISPLAY_WIDTH, 120, COLOR_DATA_BG);
+
+    // Overlay oscuro para área ATS
+    tft.fillRect(5, 150, DISPLAY_WIDTH - 10, 55, COLOR_DATA_BG);
+
+    // Overlay oscuro para footer
+    tft.fillRect(0, DISPLAY_HEIGHT - FOOTER_HEIGHT, DISPLAY_WIDTH, FOOTER_HEIGHT, COLOR_DATA_BG);
 }
 
 void displayUpdate() {
@@ -809,15 +856,39 @@ void displayUpdate() {
     // Dibujar elementos estáticos solo una vez al inicio
     static bool staticDrawn = false;
     if (!staticDrawn) {
-        tft.fillScreen(COLOR_BG);
+        displayDrawBackground();
+        displayDrawHeader();
         staticDrawn = true;
     }
 
-    // La hora en el header cambia cada minuto - se redibuja siempre pero es
-    // liviano (solo esa franja superior, no toda la pantalla)
-    displayDrawHeader();
-    displayDrawGauge();
-    displayDrawTiles();
+    // Actualizar solo zonas dinámicas (sin borrar toda la pantalla)
+    displayDrawPZEMData();
+    displayDrawATSStatus();
+
+    // Footer: solo redibujar si las cadenas cambiaron (antes se redibujaba
+    // siempre, lo que provocaba flicker visible en la franja inferior)
+    static String lastWifi = "";
+    static String lastPzem = "";
+    if (wifiStatusStr != lastWifi || pzemStatusStr != lastPzem) {
+        displayDrawFooter(wifiStatusStr, pzemStatusStr);
+        lastWifi = wifiStatusStr;
+        lastPzem = pzemStatusStr;
+    }
+
+    // LDR — solo se imprime a veces para evitar parpadeo. Leemos un valor
+    // suavizado del propio módulo de auto-brillo (que ya promedia varias
+    // muestras) para no introducir más ruido en pantalla.
+    static unsigned long ldrLastPrint = 0;
+    if (now - ldrLastPrint >= 3000) {
+        ldrLastPrint = now;
+        int ldrValue = analogRead(LDR_PIN);
+        tft.fillRect(250, 7, 68, 12, COLOR_BLUE);
+        tft.setTextColor(COLOR_WHITE);
+        tft.setTextSize(1);
+        tft.setCursor(250, 7);
+        tft.print("LDR:");
+        tft.print(ldrValue);
+    }
 }
 
 void displayShowMessage(const String& message, int duration) {
