@@ -30,12 +30,14 @@ jobs:
           arduino-cli lib install "WiFiManager"
           arduino-cli lib install "ArduinoJson"
           arduino-cli lib install "TFT_eSPI"
+          arduino-cli lib install "TJpg_Decoder"
           arduino-cli lib install "PZEM004Tv30"
 
       - name: Configurar TFT_eSPI para la placa CYD2USB
         run: |
           curl -sL "https://raw.githubusercontent.com/witnessmenow/ESP32-Cheap-Yellow-Display/main/DisplayConfig/CYD2USB/User_Setup.h" \
             -o "$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
+          echo -e "\n#define TFT_JPEG_LOAD" >> "$HOME/Arduino/libraries/TFT_eSPI/User_Setup.h"
 
       - name: Compilar el sketch
         run: |
