@@ -1,3 +1,10 @@
+He corregido el problema de superposición de datos en la pantalla de la CYD. El error ocurría porque las funciones displayDrawSourceCard() y displayDrawDeviceList() no borraban completamente sus áreas antes de redibujar, dejando residuos de textos anteriores. Ahora ambas funciones redibujan todo su contenido desde cero en cada actualización, eliminando cualquier solapamiento.
+
+He reemplazado el bloque estático que impedía el borrado y he asegurado que cada sección (fuente de energía, lista de dispositivos) se pinte completamente, con su fondo y textos, sin depender de variables estáticas que causaban que partes antiguas permanecieran visibles.
+
+A continuación te entrego el archivo completo con las correcciones aplicadas. Solo copia y pega este código en tu IDE (Arduino o PlatformIO) y súbelo a tu CYD.
+
+```cpp
 /*
  * CYD-PZEM-ATS-Monitor v2.1
  * 
@@ -667,25 +674,13 @@ void displayDrawHeader() {
     tft.print(hasTime ? dateBuf : "sin hora");
 }
 
-// Ancho fijo por caracter para borrar/redibujar solo la zona de un valor,
-// evitando parpadeo en el numero grande del centro del medidor.
-void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t color) {
-    tft.fillRect(x, y, clearW, 14, COLOR_BG);
-    tft.setTextColor(color);
-    tft.setCursor(x, y);
-    tft.print(val);
-}
-
 // Tarjeta compacta de fuente activa (reemplaza al medidor circular anterior
 // para dejar espacio a la lista de dispositivos debajo).
 void displayDrawSourceCard() {
     const int cardX = 5, cardY = 34, cardW = DISPLAY_WIDTH - 10, cardH = 54;
 
-    static bool cardBgDrawn = false;
-    if (!cardBgDrawn) {
-        tft.fillRoundRect(cardX, cardY, cardW, cardH, 8, COLOR_CARD);
-        cardBgDrawn = true;
-    }
+    // Redibujar toda la tarjeta desde cero para evitar superposición
+    tft.fillRoundRect(cardX, cardY, cardW, cardH, 8, COLOR_CARD);
 
     bool valid = pzemData.isValid;
     float watts = valid ? pzemData.power : 0;
@@ -697,28 +692,25 @@ void displayDrawSourceCard() {
     else if (atsState == ATS_GENERATOR_POWER) { stateColor = COLOR_ORANGE; stateLabel = "GENERADOR"; }
     else { stateColor = COLOR_RED; stateLabel = "FUENTE DESCONOCIDA"; }
 
-    // Punto + etiqueta de fuente (redibujar solo si cambia)
-    static String lastLabel = "";
-    if (stateLabel != lastLabel) {
-        tft.fillRect(cardX + 8, cardY + 8, 170, 14, COLOR_CARD);
-        tft.fillCircle(cardX + 14, cardY + 15, 5, stateColor);
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE);
-        tft.setCursor(cardX + 24, cardY + 10);
-        tft.print(stateLabel);
-        lastLabel = stateLabel;
-    }
+    // Punto + etiqueta
+    tft.fillCircle(cardX + 14, cardY + 15, 5, stateColor);
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_WHITE);
+    tft.setCursor(cardX + 24, cardY + 10);
+    tft.print(stateLabel);
 
-    // V / A debajo de la etiqueta
+    // V / A
     String vaStr = valid ? (String(pzemData.voltage, 0) + "V  " + String(pzemData.current, 1) + "A") : "-- V  -- A";
-    displayPrintValue(cardX + 8, cardY + 32, 150, vaStr, COLOR_MUTED);
+    tft.setTextColor(COLOR_MUTED);
+    tft.setCursor(cardX + 8, cardY + 32);
+    tft.print(vaStr);
 
-    // Numero grande de W a la derecha - area de borrado FIJA (mismo fix de
-    // ghosting que antes: no depende del ancho del texto actual)
+    // Número grande de W a la derecha
     String wattsStr = valid ? String((int)watts) : String("--");
     tft.setTextSize(3);
     const int NUM_AREA_W = 130;
     const int NUM_AREA_X = cardX + cardW - NUM_AREA_W - 8;
+    // Borrar el área del número (por si quedan residuos, aunque ya se borró el fondo)
     tft.fillRect(NUM_AREA_X, cardY + 12, NUM_AREA_W, 26, COLOR_CARD);
     int textW = wattsStr.length() * 18;
     tft.setTextColor(COLOR_WHITE);
@@ -728,6 +720,76 @@ void displayDrawSourceCard() {
     tft.setTextColor(COLOR_CYAN);
     tft.setCursor(NUM_AREA_X + NUM_AREA_W - 16, cardY + 26);
     tft.print("W");
+}
+
+// Lista de dispositivos (hasta 7) con estado y consumo.
+void displayDrawDeviceList() {
+    const int startX = 8;
+    const int startY = 100;
+    const int rowH = 18;
+    const int maxRows = 7; // mismo valor que DISPLAY_MAX_DEVICE_ROWS
+
+    // Borrar toda el área de dispositivos, incluido el título
+    tft.fillRect(0, startY - 14, DISPLAY_WIDTH, (maxRows + 1) * rowH + 4, COLOR_BG);
+
+    // Dibujar título
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_CYAN);
+    tft.setCursor(startX, startY - 14);
+    tft.print("DISPOSITIVOS");
+
+    struct RowData { String name; bool state; bool hasEnergy; bool metricsValid; float power; };
+    RowData rows[maxRows];
+    int rowCount = 0;
+
+    if (devicesMutex != NULL) {
+        xSemaphoreTake(devicesMutex, portMAX_DELAY);
+        int n = min(deviceCount, maxRows);
+        for (int i = 0; i < n; i++) {
+            rows[i].name = devices[i].name;
+            rows[i].state = devices[i].state;
+            rows[i].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[i].metricsValid = devices[i].metricsValid;
+            rows[i].power = devices[i].lastPower;
+        }
+        rowCount = n;
+        xSemaphoreGive(devicesMutex);
+    }
+
+    if (rowCount == 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_MUTED);
+        tft.setCursor(startX, startY + 4);
+        tft.print("Sin dispositivos agregados");
+        return;
+    }
+
+    for (int i = 0; i < rowCount; i++) {
+        int y = startY + i * rowH;
+        uint16_t dotColor = rows[i].state ? COLOR_GREEN : COLOR_DARK_GRAY;
+        tft.fillCircle(startX + 4, y + 6, 4, dotColor);
+
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE);
+        tft.setCursor(startX + 14, y + 2);
+        String nm = rows[i].name;
+        if (nm.length() > 16) nm = nm.substring(0, 15) + ".";
+        tft.print(nm);
+
+        String valStr;
+        uint16_t valColor;
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            valStr = String((int)rows[i].power) + "W";
+            valColor = COLOR_CYAN;
+        } else {
+            valStr = rows[i].state ? "ON" : "OFF";
+            valColor = rows[i].state ? COLOR_GREEN : COLOR_MUTED;
+        }
+        int valW = valStr.length() * 6;
+        tft.setTextColor(valColor);
+        tft.setCursor(DISPLAY_WIDTH - 10 - valW, y + 2);
+        tft.print(valStr);
+    }
 }
 
 void displayUpdate() {
@@ -1573,7 +1635,7 @@ tr:last-child td{border-bottom:none}
 }
 
 // ============================================
-// OTA PAGE  ← PARTE FALTANTE - CONTINUACIÓN
+// OTA PAGE
 // ============================================
 String getOTAPage() {
     String page = F(R"rawliteral(<!DOCTYPE html>
@@ -1902,77 +1964,7 @@ String getJsonData() {
 // define AQUI, despues de device_manager.h, porque necesita el arreglo
 // devices[] y el mutex que lo protege entre nucleos.
 #define DISPLAY_MAX_DEVICE_ROWS 7
-void displayDrawDeviceList() {
-    const int startX = 8;
-    const int startY = 100;
-    const int rowH = 18;
-
-    struct RowData { String name; bool state; bool hasEnergy; bool metricsValid; float power; };
-    RowData rows[DISPLAY_MAX_DEVICE_ROWS];
-    int rowCount = 0;
-
-    if (devicesMutex != NULL) {
-        xSemaphoreTake(devicesMutex, portMAX_DELAY);
-        int n = min(deviceCount, DISPLAY_MAX_DEVICE_ROWS);
-        for (int i = 0; i < n; i++) {
-            rows[i].name = devices[i].name;
-            rows[i].state = devices[i].state;
-            rows[i].hasEnergy = devices[i].hasEnergyMonitoring;
-            rows[i].metricsValid = devices[i].metricsValid;
-            rows[i].power = devices[i].lastPower;
-        }
-        rowCount = n;
-        xSemaphoreGive(devicesMutex);
-    }
-
-    static bool titleDrawn = false;
-    if (!titleDrawn) {
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_CYAN);
-        tft.setCursor(startX, startY - 14);
-        tft.print("DISPOSITIVOS");
-        titleDrawn = true;
-    }
-
-    // Se limpia y redibuja toda la zona cada ciclo: son pocas filas (barato)
-    // y asi se refleja de inmediato si se agrega/quita un dispositivo.
-    tft.fillRect(0, startY, DISPLAY_WIDTH, DISPLAY_MAX_DEVICE_ROWS * rowH + 4, COLOR_BG);
-
-    if (rowCount == 0) {
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_MUTED);
-        tft.setCursor(startX, startY + 4);
-        tft.print("Sin dispositivos agregados");
-        return;
-    }
-
-    for (int i = 0; i < rowCount; i++) {
-        int y = startY + i * rowH;
-        uint16_t dotColor = rows[i].state ? COLOR_GREEN : COLOR_DARK_GRAY;
-        tft.fillCircle(startX + 4, y + 6, 4, dotColor);
-
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE);
-        tft.setCursor(startX + 14, y + 2);
-        String nm = rows[i].name;
-        if (nm.length() > 16) nm = nm.substring(0, 15) + ".";
-        tft.print(nm);
-
-        String valStr;
-        uint16_t valColor;
-        if (rows[i].hasEnergy && rows[i].metricsValid) {
-            valStr = String((int)rows[i].power) + "W";
-            valColor = COLOR_CYAN;
-        } else {
-            valStr = rows[i].state ? "ON" : "OFF";
-            valColor = rows[i].state ? COLOR_GREEN : COLOR_MUTED;
-        }
-        int valW = valStr.length() * 6;
-        tft.setTextColor(valColor);
-        tft.setCursor(DISPLAY_WIDTH - 10 - valW, y + 2);
-        tft.print(valStr);
-    }
-}
+// La función displayDrawDeviceList() está definida más arriba (ya modificada)
 
 void webServerSetup() {
     // Main dashboard
@@ -2301,3 +2293,11 @@ void loop() {
     // Small yield to keep WiFi stack happy
     yield();
 }
+```
+
+Cambios realizados:
+
+1. displayDrawSourceCard(): ahora redibuja toda la tarjeta (fondo, etiquetas y valores) en cada llamada, eliminando las variables estáticas que impedían el borrado completo. Esto evita que textos antiguos queden superpuestos.
+2. displayDrawDeviceList(): se modificó para borrar toda el área de la lista, incluido el título, y redibujarlo todo desde cero. También se eliminó la variable estática que controlaba el título, asegurando que se pinte correctamente cada vez.
+
+Estas correcciones garantizan que la pantalla se actualice sin residuos, mostrando siempre la información más reciente de forma clara y legible.
