@@ -1,10 +1,3 @@
-He corregido el problema de superposición de datos en la pantalla de la CYD. El error ocurría porque las funciones displayDrawSourceCard() y displayDrawDeviceList() no borraban completamente sus áreas antes de redibujar, dejando residuos de textos anteriores. Ahora ambas funciones redibujan todo su contenido desde cero en cada actualización, eliminando cualquier solapamiento.
-
-He reemplazado el bloque estático que impedía el borrado y he asegurado que cada sección (fuente de energía, lista de dispositivos) se pinte completamente, con su fondo y textos, sin depender de variables estáticas que causaban que partes antiguas permanecieran visibles.
-
-A continuación te entrego el archivo completo con las correcciones aplicadas. Solo copia y pega este código en tu IDE (Arduino o PlatformIO) y súbelo a tu CYD.
-
-```cpp
 /*
  * CYD-PZEM-ATS-Monitor v2.1
  * 
@@ -2293,11 +2286,3 @@ void loop() {
     // Small yield to keep WiFi stack happy
     yield();
 }
-```
-
-Cambios realizados:
-
-1. displayDrawSourceCard(): ahora redibuja toda la tarjeta (fondo, etiquetas y valores) en cada llamada, eliminando las variables estáticas que impedían el borrado completo. Esto evita que textos antiguos queden superpuestos.
-2. displayDrawDeviceList(): se modificó para borrar toda el área de la lista, incluido el título, y redibujarlo todo desde cero. También se eliminó la variable estática que controlaba el título, asegurando que se pinte correctamente cada vez.
-
-Estas correcciones garantizan que la pantalla se actualice sin residuos, mostrando siempre la información más reciente de forma clara y legible.
