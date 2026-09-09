@@ -34,6 +34,7 @@
 // CONFIGURACION
 // ============================================
 #define MAX_DEVICES 20
+#define MANUAL_OVERRIDE_WINDOW_MS 600000 // 10 minutos - tiempo que se respeta un cambio manual/boton fisico antes de que la automatizacion retome el control
 #define DEVICE_HTTP_TIMEOUT 1000
 #define METRICS_HTTP_TIMEOUT 1000
 
@@ -75,6 +76,10 @@ struct SmartDevice {
     unsigned long lastAtsCorrectionAttempt = 0; // evita martillar un dispositivo inalcanzable
     int consecutiveFailures = 0; // backoff progresivo si el dispositivo no responde
     int pollFailures = 0; // fallos consecutivos de sondeo de estado, para marcar "sin conexion"
+
+    // Respeto del boton fisico / control externo (app del fabricante, etc.)
+    bool expectedState = false;         // lo ultimo que NOSOTROS mandamos (para distinguir de un cambio externo)
+    unsigned long manualOverrideUntil = 0; // mientras millis() < esto, la automatizacion no toca el dispositivo
 };
 
 // ============================================
@@ -200,6 +205,7 @@ void devicesLoad() {
         d.dimmable = o["dimmable"] | false;
         d.brightness = o["brightness"] | 100;
         d.state = o["state"] | false;
+        d.expectedState = d.state;
         d.scheduleEnabled = o["scheduleEnabled"] | false;
         d.onHour = o["onHour"] | 6;
         d.onMin = o["onMin"] | 0;
@@ -352,6 +358,17 @@ void devicePollTick() {
     int idx = findDeviceIndexById(targetId); // fresco, por si el arreglo cambio mientras se esperaba la red
     if (idx >= 0) {
         if (gotState) {
+            // Si el estado real difiere de lo ultimo que NOSOTROS mandamos, es
+            // un cambio externo (boton fisico del Sonoff, app del fabricante,
+            // etc.) - se respeta por un tiempo antes de que la automatizacion
+            // vuelva a tomar el control, para no "pelear" con la persona.
+            if (realState != devices[idx].expectedState) {
+                devices[idx].manualOverrideUntil = millis() + MANUAL_OVERRIDE_WINDOW_MS;
+                devices[idx].expectedState = realState;
+                logDeviceEvent(devices[idx].name, realState, "Botón físico");
+                Serial.printf("Cambio externo detectado en %s -> %s (respetando por %d min)\n",
+                    devices[idx].name.c_str(), realState ? "ON" : "OFF", (int)(MANUAL_OVERRIDE_WINDOW_MS / 60000));
+            }
             devices[idx].state = realState;
             devices[idx].pollFailures = 0;
         } else if (devices[idx].pollFailures < 100) {
@@ -520,6 +537,9 @@ void enforceAtsAutomation() {
         }
 
         if (hasOpinion && d.state != desiredLocal) {
+            // Respeta un cambio manual/boton fisico reciente - la automatizacion
+            // no pelea contra la persona hasta que pase la ventana de respeto.
+            if (millis() < d.manualOverrideUntil) continue;
             // Backoff progresivo: 1.5s, 3s, 6s, 12s, 24s, tope 48s.
             unsigned long cooldown = 1500UL << min(d.consecutiveFailures, 5);
             if (millis() - d.lastAtsCorrectionAttempt < cooldown) continue;
@@ -548,6 +568,7 @@ void enforceAtsAutomation() {
         if (ok) {
             if (devices[idx].state != desired) logDeviceEvent(devices[idx].name, desired, "Automatización ATS");
             devices[idx].state = desired;
+            devices[idx].expectedState = desired;
             devices[idx].consecutiveFailures = 0;
         } else {
             devices[idx].consecutiveFailures++;
@@ -586,6 +607,7 @@ void schedulerCheck() {
     for (int i = 0; i < deviceCount; i++) {
         SmartDevice& d = devices[i];
         if (!d.scheduleEnabled) continue;
+        if (millis() < d.manualOverrideUntil) continue; // respeta boton fisico reciente
 
         int onKey = d.onHour * 60 + d.onMin;
         int offKey = d.offHour * 60 + d.offMin;
@@ -610,6 +632,7 @@ void schedulerCheck() {
         if (idx >= 0 && ok) {
             if (devices[idx].state != pending[i].turnOn) logDeviceEvent(devices[idx].name, pending[i].turnOn, "Horario");
             devices[idx].state = pending[i].turnOn;
+            devices[idx].expectedState = pending[i].turnOn;
         }
         xSemaphoreGive(devicesMutex);
     }

@@ -638,6 +638,7 @@ bool displayBegin() {
 // Cabecera: hora real (o uptime si no hay hora aun) a la izquierda,
 // punto de estado WiFi + fecha a la derecha.
 void displayDrawHeader() {
+    // Limpiar toda el area del header antes de redibujar
     tft.fillRect(0, 0, DISPLAY_WIDTH, HEADER_HEIGHT, COLOR_BG);
     tft.fillRect(0, HEADER_HEIGHT - 2, DISPLAY_WIDTH, 2, COLOR_GREEN);
 
@@ -654,6 +655,8 @@ void displayDrawHeader() {
 
     tft.setTextColor(COLOR_CYAN);
     tft.setTextSize(3);
+    // Limpiar area de hora antes de dibujar (evita superposicion de caracteres)
+    tft.fillRect(8, 2, 100, 24, COLOR_BG);
     tft.setCursor(8, 2);
     tft.print(timeBuf);
 
@@ -663,8 +666,22 @@ void displayDrawHeader() {
 
     tft.setTextSize(1);
     tft.setTextColor(COLOR_WHITE);
+    // Limpiar area de fecha antes de dibujar
+    tft.fillRect(DISPLAY_WIDTH - 54, 8, 50, 12, COLOR_BG);
     tft.setCursor(DISPLAY_WIDTH - 54, 8);
     tft.print(hasTime ? dateBuf : "sin hora");
+}
+
+// Ancho fijo por caracter para borrar/redibujar solo la zona de un valor,
+// evitando parpadeo en el numero grande del centro del medidor.
+void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t color) {
+    // Asegurar que el area de borrado sea suficiente para el valor mas largo posible
+    int neededW = val.length() * 12; // 12px por caracter en textSize 1
+    if (neededW > clearW) clearW = neededW;
+    tft.fillRect(x, y, clearW, 16, COLOR_BG);
+    tft.setTextColor(color);
+    tft.setCursor(x, y);
+    tft.print(val);
 }
 
 // Tarjeta compacta de fuente activa (reemplaza al medidor circular anterior
@@ -672,7 +689,7 @@ void displayDrawHeader() {
 void displayDrawSourceCard() {
     const int cardX = 5, cardY = 34, cardW = DISPLAY_WIDTH - 10, cardH = 54;
 
-    // Redibujar toda la tarjeta desde cero para evitar superposición
+    // Redibujar fondo siempre (no usar flag estatico) por si la pantalla se limpia externamente
     tft.fillRoundRect(cardX, cardY, cardW, cardH, 8, COLOR_CARD);
 
     bool valid = pzemData.isValid;
@@ -685,104 +702,42 @@ void displayDrawSourceCard() {
     else if (atsState == ATS_GENERATOR_POWER) { stateColor = COLOR_ORANGE; stateLabel = "GENERADOR"; }
     else { stateColor = COLOR_RED; stateLabel = "FUENTE DESCONOCIDA"; }
 
-    // Punto + etiqueta
-    tft.fillCircle(cardX + 14, cardY + 15, 5, stateColor);
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_WHITE);
-    tft.setCursor(cardX + 24, cardY + 10);
-    tft.print(stateLabel);
+    // Punto + etiqueta de fuente (redibujar solo si cambia)
+    static String lastLabel = "";
+    if (stateLabel != lastLabel) {
+        tft.fillRect(cardX + 8, cardY + 6, 180, 18, COLOR_CARD);
+        tft.fillCircle(cardX + 14, cardY + 15, 5, stateColor);
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE);
+        tft.setCursor(cardX + 24, cardY + 10);
+        tft.print(stateLabel);
+        lastLabel = stateLabel;
+    }
 
-    // V / A
+    // V / A debajo de la etiqueta
     String vaStr = valid ? (String(pzemData.voltage, 0) + "V  " + String(pzemData.current, 1) + "A") : "-- V  -- A";
+    // Limpiar area completa antes de dibujar valores de V/A
+    tft.fillRect(cardX + 8, cardY + 30, 160, 16, COLOR_CARD);
+    tft.setTextSize(1);
     tft.setTextColor(COLOR_MUTED);
     tft.setCursor(cardX + 8, cardY + 32);
     tft.print(vaStr);
 
-    // Número grande de W a la derecha
+    // Numero grande de W a la derecha - area de borrado FIJA (mismo fix de
+    // ghosting que antes: no depende del ancho del texto actual)
     String wattsStr = valid ? String((int)watts) : String("--");
     tft.setTextSize(3);
-    const int NUM_AREA_W = 130;
+    const int NUM_AREA_W = 140;
     const int NUM_AREA_X = cardX + cardW - NUM_AREA_W - 8;
-    // Borrar el área del número (por si quedan residuos, aunque ya se borró el fondo)
-    tft.fillRect(NUM_AREA_X, cardY + 12, NUM_AREA_W, 26, COLOR_CARD);
+    tft.fillRect(NUM_AREA_X, cardY + 10, NUM_AREA_W, 30, COLOR_CARD);
     int textW = wattsStr.length() * 18;
     tft.setTextColor(COLOR_WHITE);
-    tft.setCursor(NUM_AREA_X + NUM_AREA_W - textW - 22, cardY + 14);
+    tft.setCursor(NUM_AREA_X + NUM_AREA_W - textW - 24, cardY + 12);
     tft.print(wattsStr);
     tft.setTextSize(1);
     tft.setTextColor(COLOR_CYAN);
-    tft.setCursor(NUM_AREA_X + NUM_AREA_W - 16, cardY + 26);
+    tft.setCursor(NUM_AREA_X + NUM_AREA_W - 18, cardY + 28);
     tft.print("W");
-}
-
-// Lista de dispositivos (hasta 7) con estado y consumo.
-void displayDrawDeviceList() {
-    const int startX = 8;
-    const int startY = 100;
-    const int rowH = 18;
-    const int maxRows = 7; // mismo valor que DISPLAY_MAX_DEVICE_ROWS
-
-    // Borrar toda el área de dispositivos, incluido el título
-    tft.fillRect(0, startY - 14, DISPLAY_WIDTH, (maxRows + 1) * rowH + 4, COLOR_BG);
-
-    // Dibujar título
-    tft.setTextSize(1);
-    tft.setTextColor(COLOR_CYAN);
-    tft.setCursor(startX, startY - 14);
-    tft.print("DISPOSITIVOS");
-
-    struct RowData { String name; bool state; bool hasEnergy; bool metricsValid; float power; };
-    RowData rows[maxRows];
-    int rowCount = 0;
-
-    if (devicesMutex != NULL) {
-        xSemaphoreTake(devicesMutex, portMAX_DELAY);
-        int n = min(deviceCount, maxRows);
-        for (int i = 0; i < n; i++) {
-            rows[i].name = devices[i].name;
-            rows[i].state = devices[i].state;
-            rows[i].hasEnergy = devices[i].hasEnergyMonitoring;
-            rows[i].metricsValid = devices[i].metricsValid;
-            rows[i].power = devices[i].lastPower;
-        }
-        rowCount = n;
-        xSemaphoreGive(devicesMutex);
-    }
-
-    if (rowCount == 0) {
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_MUTED);
-        tft.setCursor(startX, startY + 4);
-        tft.print("Sin dispositivos agregados");
-        return;
-    }
-
-    for (int i = 0; i < rowCount; i++) {
-        int y = startY + i * rowH;
-        uint16_t dotColor = rows[i].state ? COLOR_GREEN : COLOR_DARK_GRAY;
-        tft.fillCircle(startX + 4, y + 6, 4, dotColor);
-
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE);
-        tft.setCursor(startX + 14, y + 2);
-        String nm = rows[i].name;
-        if (nm.length() > 16) nm = nm.substring(0, 15) + ".";
-        tft.print(nm);
-
-        String valStr;
-        uint16_t valColor;
-        if (rows[i].hasEnergy && rows[i].metricsValid) {
-            valStr = String((int)rows[i].power) + "W";
-            valColor = COLOR_CYAN;
-        } else {
-            valStr = rows[i].state ? "ON" : "OFF";
-            valColor = rows[i].state ? COLOR_GREEN : COLOR_MUTED;
-        }
-        int valW = valStr.length() * 6;
-        tft.setTextColor(valColor);
-        tft.setCursor(DISPLAY_WIDTH - 10 - valW, y + 2);
-        tft.print(valStr);
-    }
 }
 
 void displayUpdate() {
@@ -860,10 +815,13 @@ void displayWiFiPortalInfo() {
 // WEB SERVER - Professional Industrial Dashboard
 // ============================================
 String getMainPage() {
-    String page;
-    page.reserve(8000);
-    
-    float apparentPower = 0;
+    static String cachedPage;
+    static bool cached = false;
+    if (!cached) {
+        String page;
+        page.reserve(20000);
+        
+        float apparentPower = 0;
     float reactivePower = 0;
     if (pzemData.isValid && pzemData.voltage > 0 && pzemData.pf > 0) {
         apparentPower = pzemData.power / pzemData.pf;
@@ -1232,12 +1190,19 @@ refresh();setInterval(refresh,)rawliteral");
 </body>
 </html>)rawliteral");
     
-    return page;
+        cachedPage = page;
+        cached = true;
+    }
+    return cachedPage;
 }
 
 String getHistoryPage(String filter) {
-    String page;
-    page.reserve(10000);
+    static String cachedPage;
+    static String cachedFilter;
+    static bool cached = false;
+    if (!cached || cachedFilter != filter) {
+        String page;
+        page.reserve(20000);
     
     unsigned long ut = atsGetTotalTimeInState(ATS_UTILITY_POWER);
     unsigned long gt = atsGetTotalTimeInState(ATS_GENERATOR_POWER);
@@ -1298,7 +1263,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .donut-wrapper{position:relative;width:120px;height:120px;margin:0 auto}
 .donut-chart{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--green) )rawliteral");
     page += String(up, 1);
-    page += F(R"rawliteral(% , var(--orange) 0)}
+    page += F(R"rawliteral(%%, var(--orange) 0 100%)}
 .donut-hole{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:80px;height:80px;background:var(--card);border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center}
 .donut-label-pct{font-size:1.1em;font-weight:700;color:var(--accent)}
 .donut-label-txt{font-size:0.6em;color:var(--muted)}
@@ -1624,13 +1589,20 @@ tr:last-child td{border-bottom:none}
 </body>
 </html>)rawliteral");
     
-    return page;
+        cachedPage = page;
+        cachedFilter = filter;
+        cached = true;
+    }
+    return cachedPage;
 }
 
 // ============================================
 // OTA PAGE
 // ============================================
 String getOTAPage() {
+    static String cachedPage;
+    static bool cached = false;
+    if (!cached) {
     String page = F(R"rawliteral(<!DOCTYPE html>
 <html lang='es'>
 <head>
@@ -1910,7 +1882,10 @@ function rebootDevice() {
 </script>
 </body>
 </html>)rawliteral");
-    return page;
+        cachedPage = page;
+        cached = true;
+    }
+    return cachedPage;
 }
 
 // ============================================
@@ -1957,7 +1932,76 @@ String getJsonData() {
 // define AQUI, despues de device_manager.h, porque necesita el arreglo
 // devices[] y el mutex que lo protege entre nucleos.
 #define DISPLAY_MAX_DEVICE_ROWS 7
-// La función displayDrawDeviceList() está definida más arriba (ya modificada)
+void displayDrawDeviceList() {
+    const int startX = 8;
+    const int startY = 100;
+    const int rowH = 18;
+
+    struct RowData { String name; bool state; bool hasEnergy; bool metricsValid; float power; };
+    RowData rows[DISPLAY_MAX_DEVICE_ROWS];
+    int rowCount = 0;
+
+    if (devicesMutex != NULL) {
+        xSemaphoreTake(devicesMutex, portMAX_DELAY);
+        int n = min(deviceCount, DISPLAY_MAX_DEVICE_ROWS);
+        for (int i = 0; i < n; i++) {
+            rows[i].name = devices[i].name;
+            rows[i].state = devices[i].state;
+            rows[i].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[i].metricsValid = devices[i].metricsValid;
+            rows[i].power = devices[i].lastPower;
+        }
+        rowCount = n;
+        xSemaphoreGive(devicesMutex);
+    }
+
+    // Redibujar titulo siempre (no usar flag estatico) por si la pantalla se limpia externamente
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_CYAN);
+    tft.setCursor(startX, startY - 14);
+    tft.print("DISPOSITIVOS");
+
+    // Se limpia y redibuja toda la zona cada ciclo: son pocas filas (barato)
+    // y asi se refleja de inmediato si se agrega/quita un dispositivo.
+    tft.fillRect(0, startY, DISPLAY_WIDTH, DISPLAY_MAX_DEVICE_ROWS * rowH + 4, COLOR_BG);
+
+    if (rowCount == 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_MUTED);
+        tft.setCursor(startX, startY + 4);
+        tft.print("Sin dispositivos agregados");
+        return;
+    }
+
+    for (int i = 0; i < rowCount; i++) {
+        int y = startY + i * rowH;
+        uint16_t dotColor = rows[i].state ? COLOR_GREEN : COLOR_DARK_GRAY;
+        tft.fillCircle(startX + 4, y + 6, 4, dotColor);
+
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE);
+        tft.setCursor(startX + 14, y + 2);
+        String nm = rows[i].name;
+        if (nm.length() > 16) nm = nm.substring(0, 15) + ".";
+        tft.print(nm);
+
+        String valStr;
+        uint16_t valColor;
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            valStr = String((int)rows[i].power) + "W";
+            valColor = COLOR_CYAN;
+        } else {
+            valStr = rows[i].state ? "ON" : "OFF";
+            valColor = rows[i].state ? COLOR_GREEN : COLOR_MUTED;
+        }
+        // Limpiar area de valor antes de dibujar (evita superposicion de caracteres)
+        int valW = valStr.length() * 8;
+        tft.fillRect(DISPLAY_WIDTH - 10 - valW - 4, y, valW + 8, rowH, COLOR_BG);
+        tft.setTextColor(valColor);
+        tft.setCursor(DISPLAY_WIDTH - 10 - valW, y + 2);
+        tft.print(valStr);
+    }
+}
 
 void webServerSetup() {
     // Main dashboard
