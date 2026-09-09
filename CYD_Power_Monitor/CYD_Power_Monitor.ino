@@ -123,6 +123,15 @@ unsigned long schedulerLastCheck = 0;
 unsigned long atsAutoLastCheck = 0;
 unsigned long brightnessLastCheck = 0;
 
+// Rate limiting para API web
+#define RATE_LIMIT_WINDOW_MS 60000  // 1 minuto
+#define RATE_LIMIT_MAX_REQUESTS 120 // max 120 requests por minuto
+unsigned long rateLimitWindowStart = 0;
+int rateLimitRequestCount = 0;
+
+// API key para OTA (cambiar por un valor seguro en produccion)
+#define OTA_API_KEY "CYD-Monitor-OTA-2024"
+
 const uint16_t COLOR_BG = 0x0000;
 const uint16_t COLOR_WHITE = 0xFFFF;
 const uint16_t COLOR_YELLOW = 0xFFE0;
@@ -231,6 +240,7 @@ void atsUpdate() {
         atsState = newState;
         atsLastDebounce = now;
         atsStableCounter = 0;
+        atsLastStateChange = now; // Update timestamp on every actual state change
     } else {
         atsStableCounter++;
         if (atsStableCounter >= ATS_STABLE_COUNT && atsState != atsLastState) {
@@ -265,6 +275,11 @@ unsigned long atsGetTimeInState() {
 // hay un cambio de estado real (pocas veces al dia), asi que reescribir el
 // archivo completo cada vez es simple y no desgasta la flash.
 void historySaveToFlash() {
+    // Throttling: no escribir mas de una vez por HISTORY_SAVE_INTERVAL
+    unsigned long now = millis();
+    if (now - historyLastSave < HISTORY_SAVE_INTERVAL) return;
+    historyLastSave = now;
+
     File f = SPIFFS.open(HISTORY_FILE, FILE_WRITE);
     if (!f) {
         Serial.println("historySaveToFlash: no se pudo abrir el archivo");
@@ -443,17 +458,6 @@ String formatDurationLong(unsigned long seconds) {
     return result;
 }
 
-String formatTimestamp(unsigned long epoch) {
-    unsigned long days = epoch / 86400;
-    unsigned long hours = (epoch % 86400) / 3600;
-    unsigned long mins = (epoch % 3600) / 60;
-    unsigned long secs = epoch % 60;
-    
-    char buf[20];
-    snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", hours, mins, secs);
-    return String(buf);
-}
-
 unsigned long atsGetTotalTimeInState(ATSState targetState) {
     unsigned long total = 0;
     for (int i = 0; i < historyCount; i++) {
@@ -537,12 +541,6 @@ bool pzemBegin() {
 // (ver pzemTaskBegin / pzemTaskEntry abajo) para no bloquear ni la pantalla ni
 // el servidor web. Esta funcion existe para mantener el resto del codigo que
 // la llamaba sin cambios.
-bool pzemRead() {
-    if (!pzemInitialized) return false;
-    if (!pzemData.isValid) return false;
-    return true;
-}
-
 // Lectura "fresca" usada SOLO desde la tarea dedicada al PZEM. Hace las 6
 // transacciones Modbus una tras otra. Cada una tarda ~300ms en baudrate 9600
 // (timeout del PZEM004Tv30); en total bloquea 1.5-2s. Por eso vive en su
@@ -746,7 +744,8 @@ void displayUpdate() {
     if (now - displayLastUpdate < DISPLAY_UPDATE_INTERVAL) return;
     displayLastUpdate = now;
 
-    // Dibujar elementos estáticos solo una vez al inicio
+    // Dibujar fondo de pantalla solo una vez (usamos flag estatico para
+    // no redibujar el fondo completo en cada ciclo, solo los elementos dinamicos)
     static bool staticDrawn = false;
     if (!staticDrawn) {
         tft.fillScreen(COLOR_BG);
@@ -815,13 +814,10 @@ void displayWiFiPortalInfo() {
 // WEB SERVER - Professional Industrial Dashboard
 // ============================================
 String getMainPage() {
-    static String cachedPage;
-    static bool cached = false;
-    if (!cached) {
-        String page;
-        page.reserve(20000);
-        
-        float apparentPower = 0;
+    String page;
+    page.reserve(20000);
+    
+    float apparentPower = 0;
     float reactivePower = 0;
     if (pzemData.isValid && pzemData.voltage > 0 && pzemData.pf > 0) {
         apparentPower = pzemData.power / pzemData.pf;
@@ -1190,19 +1186,12 @@ refresh();setInterval(refresh,)rawliteral");
 </body>
 </html>)rawliteral");
     
-        cachedPage = page;
-        cached = true;
-    }
-    return cachedPage;
+    return page;
 }
 
 String getHistoryPage(String filter) {
-    static String cachedPage;
-    static String cachedFilter;
-    static bool cached = false;
-    if (!cached || cachedFilter != filter) {
-        String page;
-        page.reserve(20000);
+    String page;
+    page.reserve(25000);
     
     unsigned long ut = atsGetTotalTimeInState(ATS_UTILITY_POWER);
     unsigned long gt = atsGetTotalTimeInState(ATS_GENERATOR_POWER);
@@ -1589,11 +1578,7 @@ tr:last-child td{border-bottom:none}
 </body>
 </html>)rawliteral");
     
-        cachedPage = page;
-        cachedFilter = filter;
-        cached = true;
-    }
-    return cachedPage;
+    return page;
 }
 
 // ============================================
@@ -1892,7 +1877,7 @@ function rebootDevice() {
 // JSON API
 // ============================================
 String getJsonData() {
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<1024> doc;
     
     JsonObject pzem = doc.createNestedObject("pzem");
     pzem["voltage"]   = pzemData.voltage;
@@ -2003,20 +1988,43 @@ void displayDrawDeviceList() {
     }
 }
 
+// Rate limiting: permite hasta RATE_LIMIT_MAX_REQUESTS por ventana de tiempo
+bool checkRateLimit() {
+    unsigned long now = millis();
+    if (now - rateLimitWindowStart >= RATE_LIMIT_WINDOW_MS) {
+        rateLimitWindowStart = now;
+        rateLimitRequestCount = 0;
+    }
+    rateLimitRequestCount++;
+    return rateLimitRequestCount <= RATE_LIMIT_MAX_REQUESTS;
+}
+
 void webServerSetup() {
     // Main dashboard
     server.on("/", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
         server.send(200, "text/html", getMainPage());
     });
     
     // ATS history page
     server.on("/history", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
         String filter = server.hasArg("filter") ? server.arg("filter") : "day";
         server.send(200, "text/html", getHistoryPage(filter));
     });
     
     // Exportar historial ATS a CSV
     server.on("/history.csv", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
         String csv = "numero,estado,duracion_seg,fecha_hora\n";
         for (int i = 0; i < historyCount; i++) {
             int idx = (historyCount < MAX_HISTORY_ENTRIES) ? i : (historyIndex + i) % MAX_HISTORY_ENTRIES;
@@ -2048,6 +2056,10 @@ void webServerSetup() {
     
     // ATS history JSON
     server.on("/api/history", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+            return;
+        }
         StaticJsonDocument<4096> doc;
         JsonArray arr = doc.createNestedArray("history");
         for (int i = 0; i < historyCount; i++) {
@@ -2066,15 +2078,26 @@ void webServerSetup() {
 
     // Reboot endpoint
     server.on("/reboot", HTTP_POST, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
         server.send(200, "text/plain", "Rebooting...");
         delay(500);
         ESP.restart();
     });
     
-    // OTA firmware upload handler
+    // OTA firmware upload handler (con autenticacion basica por API key)
     server.on("/update", HTTP_POST,
-        // Response after upload completes
         []() {
+            if (!checkRateLimit()) {
+                server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+                return;
+            }
+            if (!server.hasArg("key") || server.arg("key") != OTA_API_KEY) {
+                server.send(401, "text/plain", "No autorizado: se requiere API key");
+                return;
+            }
             bool success = !Update.hasError();
             server.sendHeader("Connection", "close");
             server.send(success ? 200 : 500,
@@ -2206,7 +2229,20 @@ void setup() {
     
     // Almacenamiento persistente (historial ATS)
     if (!SPIFFS.begin(true)) {
-        Serial.println("SPIFFS: fallo al montar/formatear");
+        Serial.println("SPIFFS: fallo al montar/formatear - el historial no se guardara");
+        // Mostrar advertencia en pantalla
+        if (displayInitialized) {
+            tft.fillScreen(COLOR_BG);
+            tft.setTextColor(COLOR_RED);
+            tft.setTextSize(2);
+            tft.setCursor(10, 50);
+            tft.print("SPIFFS Error!");
+            tft.setTextColor(COLOR_WHITE);
+            tft.setTextSize(1);
+            tft.setCursor(10, 80);
+            tft.print("Historial no disponible");
+            delay(3000);
+        }
     } else {
         historyLoadFromFlash();
     }

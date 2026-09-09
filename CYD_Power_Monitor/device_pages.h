@@ -18,7 +18,7 @@ extern WebServer server; // declarado en el .ino principal
 // vez de regenerar ~11KB de String concatenado en cada peticion.
 String getDevicesPage() {
     String page;
-    page.reserve(11000);
+    page.reserve(15000);
 
     page = "<!DOCTYPE html><html lang='es'><head>";
     page += "<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
@@ -279,7 +279,11 @@ String getDevicesPage() {
 // API HANDLERS
 // ============================================
 void apiDevicesList() {
-    DynamicJsonDocument doc(7168);
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
+    DynamicJsonDocument doc(12288);
     JsonArray arr = doc.to<JsonArray>();
     xSemaphoreTake(devicesMutex, portMAX_DELAY);
     for (int i = 0; i < deviceCount; i++) {
@@ -314,6 +318,10 @@ void apiDevicesList() {
 }
 
 void apiDeviceAdd() {
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
     if (deviceCount >= MAX_DEVICES) {
         server.send(400, "application/json", "{\"error\":\"Limite de dispositivos alcanzado\"}");
         return;
@@ -328,6 +336,10 @@ void apiDeviceAdd() {
     d.id = makeDeviceId();
     d.name = doc["name"].as<String>();
     d.ip = doc["ip"].as<String>();
+    if (!isValidIp(d.ip)) {
+        server.send(400, "application/json", "{\"error\":\"Direccion IP invalida\"}");
+        return;
+    }
     d.type = deviceTypeFromStr(doc["type"].as<String>());
     d.category = doc["category"].as<String>();
     d.dimmable = doc["dimmable"] | false;
@@ -346,6 +358,10 @@ void apiDeviceAdd() {
 }
 
 void apiDeviceUpdate() {
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
     String body = server.arg("plain");
     StaticJsonDocument<512> doc;
     if (deserializeJson(doc, body)) {
@@ -363,6 +379,11 @@ void apiDeviceUpdate() {
     SmartDevice& d = devices[idx];
     d.name = doc["name"].as<String>();
     d.ip = doc["ip"].as<String>();
+    if (!isValidIp(d.ip)) {
+        xSemaphoreGive(devicesMutex);
+        server.send(400, "application/json", "{\"error\":\"Direccion IP invalida\"}");
+        return;
+    }
     d.type = deviceTypeFromStr(doc["type"].as<String>());
     d.category = doc["category"].as<String>();
     d.dimmable = doc["dimmable"] | false;
@@ -381,6 +402,10 @@ void apiDeviceUpdate() {
 }
 
 void apiDeviceDelete() {
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
     if (!server.hasArg("id")) { server.send(400, "application/json", "{\"error\":\"falta id\"}"); return; }
     String id = server.arg("id");
     xSemaphoreTake(devicesMutex, portMAX_DELAY);
@@ -398,6 +423,10 @@ void apiDeviceDelete() {
 }
 
 void apiDeviceToggle() {
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
     if (!server.hasArg("id")) { server.send(400, "application/json", "{\"error\":\"falta id\"}"); return; }
     String id = server.arg("id");
 
@@ -430,6 +459,10 @@ void apiDeviceToggle() {
 }
 
 void apiDeviceBrightness() {
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
     if (!server.hasArg("id") || !server.hasArg("value")) { server.send(400, "application/json", "{\"error\":\"faltan parametros\"}"); return; }
     String id = server.arg("id");
     int value = server.arg("value").toInt();
@@ -460,6 +493,10 @@ void apiDeviceBrightness() {
 }
 
 void apiDevConfigGet() {
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
     StaticJsonDocument<300> doc;
     doc["utcOffset"] = utcOffsetHours;
     doc["ntpSynced"] = ntpSynced;
@@ -481,6 +518,10 @@ void apiDevConfigGet() {
 }
 
 void apiDevConfigSet() {
+    if (!checkRateLimit()) {
+        server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+        return;
+    }
     String body = server.arg("plain");
     StaticJsonDocument<256> doc;
     if (deserializeJson(doc, body)) {

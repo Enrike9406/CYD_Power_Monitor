@@ -143,6 +143,26 @@ String makeDeviceId() {
     return "dev_" + String((uint32_t)millis(), HEX) + String(counter, HEX);
 }
 
+// Validacion simple de direccion IPv4
+bool isValidIp(const String& ip) {
+    int dots = 0;
+    int octet = 0;
+    for (int i = 0; i < ip.length(); i++) {
+        char c = ip.charAt(i);
+        if (c == '.') {
+            dots++;
+            if (octet < 0 || octet > 255) return false;
+            octet = 0;
+        } else if (c >= '0' && c <= '9') {
+            octet = octet * 10 + (c - '0');
+            if (octet > 255) return false;
+        } else {
+            return false;
+        }
+    }
+    return dots == 3 && octet >= 0 && octet <= 255;
+}
+
 int findDeviceIndexById(const String& id) {
     for (int i = 0; i < deviceCount; i++) {
         if (devices[i].id == id) return i;
@@ -154,7 +174,7 @@ int findDeviceIndexById(const String& id) {
 // PERSISTENCIA (NVS via Preferences, JSON)
 // ============================================
 void devicesSave() {
-    DynamicJsonDocument doc(6144);
+    DynamicJsonDocument doc(8192);
     JsonArray arr = doc.to<JsonArray>();
     for (int i = 0; i < deviceCount; i++) {
         JsonObject o = arr.createNestedObject();
@@ -247,8 +267,16 @@ bool httpCmndPower(const String& ip, bool on) {
     http.begin(url);
     http.setTimeout(DEVICE_HTTP_TIMEOUT);
     int code = http.GET();
+    if (code != 200) {
+        http.end();
+        return false;
+    }
+    String body = http.getString();
     http.end();
-    return code == 200;
+    // Validar que la respuesta contenga el estado POWER esperado
+    String expected = on ? "ON" : "OFF";
+    return body.indexOf("\"POWER\":\"" + expected + "\"") >= 0 ||
+           body.indexOf("\"POWER\":" + expected) >= 0;
 }
 
 bool httpCmndDimmer(const String& ip, int value) {
@@ -281,7 +309,7 @@ bool httpCmndFetchEnergyRaw(const String& ip, float& outV, float& outC, float& o
     String body = http.getString();
     http.end();
 
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(2048);
     if (deserializeJson(doc, body)) return false;
     JsonObject energy = doc["StatusSNS"]["ENERGY"];
     if (energy.isNull()) return false;
