@@ -151,7 +151,7 @@ const uint16_t COLOR_CARD_BG   = 0x2104;  // Fondo de tarjetas alterno
 const uint16_t COLOR_BORDER    = 0x2945;  // Borde sutil
 const uint16_t COLOR_ACCENT    = 0x07FF;  // Color de acento (cyan)
 
-const int HEADER_HEIGHT = 32;
+const int HEADER_HEIGHT = 34;
 const int FOOTER_HEIGHT = 20;
 const int COL1_X = 5;
 const int COL2_X = 165;
@@ -700,7 +700,7 @@ void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t col
 
 // Panel principal de potencia y estado ATS - diseño elegante
 void displayDrawSourceCard() {
-    const int cardX = 5, cardY = 34, cardW = DISPLAY_WIDTH - 10, cardH = 70;
+    const int cardX = 5, cardY = 36, cardW = DISPLAY_WIDTH - 10, cardH = 70;
 
     // Fondo con borde sutil
     tft.fillRoundRect(cardX, cardY, cardW, cardH, 6, COLOR_CARD);
@@ -1925,7 +1925,9 @@ function startUpload() {
   formData.append('firmware', file);
 
   const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/update', true);
+  xhr.open('POST', '/update?key=)rawliteral");
+    page += OTA_API_KEY;
+    page += F(R"rawliteral(', true);
 
   xhr.upload.onprogress = function(e) {
     if (e.lengthComputable) {
@@ -2024,7 +2026,7 @@ String getJsonData() {
 #define DISPLAY_MAX_DEVICE_ROWS 7
 void displayDrawDeviceList() {
     const int startX = 8;
-    const int startY = 108; // Debajo del panel de potencia (34 + 70 + 4)
+    const int startY = 110; // Debajo del panel de potencia (36 + 70 + 4)
     const int rowH = 16;
 
     struct RowData { String name; bool state; bool hasEnergy; bool metricsValid; float power; };
