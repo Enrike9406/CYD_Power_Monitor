@@ -33,6 +33,7 @@
 #include <TFT_eSPI.h>
 #include <PZEM004Tv30.h>
 #include <SPIFFS.h>
+#include <Preferences.h>
 
 // ============================================
 // CONFIGURACION
@@ -59,7 +60,7 @@
 #define DEBUG_BAUD_RATE 115200
 #define WEB_REFRESH_INTERVAL 5
 #define BOOT_RESET_HOLD_TIME 5000
-#define FIRMWARE_VERSION "2.2-TeslaUI"
+#define FIRMWARE_VERSION "3.0-6Themes"
 #define MAX_HISTORY_ENTRIES 300
 #define HISTORY_SAVE_INTERVAL 60000
 #define SCHEDULER_CHECK_INTERVAL 3000
@@ -172,6 +173,14 @@ void checkBootButton() {
     }
     
     if (buttonState == HIGH) {
+        if (bootButtonPressed) {
+            unsigned long pressTime = millis() - bootButtonPressStart;
+            // Pulsacion corta: cambia de tema. 5 s o mas: conserva el reset WiFi.
+            if (pressTime < BOOT_RESET_HOLD_TIME) {
+                uiNextTheme();
+                Serial.println("Theme changed: " + String(uiThemeName(currentTheme)));
+            }
+        }
         bootButtonPressed = false;
         bootResetActive = false;
     }
@@ -861,6 +870,45 @@ void displayDrawFooter() {
     uiLastIp = ip;
 }
 
+void displayRenderCurrentTheme() {
+    if (!displayInitialized) return;
+
+    // Si el usuario cambio de tema, reconstruimos toda la pantalla.
+    if (previousTheme != currentTheme) {
+        previousTheme = currentTheme;
+        uiResetDrawState();
+        tft.fillScreen(UI_BG);
+    }
+
+    switch (currentTheme) {
+        case THEME_SCADA:
+            themeDrawSCADA();
+            break;
+        case THEME_MINIMAL:
+            themeDrawMinimal();
+            break;
+        case THEME_CYBERPUNK:
+            themeDrawCyberpunk();
+            break;
+        case THEME_RETRO:
+            themeDrawRetro();
+            break;
+        case THEME_GLASS:
+            themeDrawGlass();
+            break;
+        case THEME_TESLA:
+        default:
+            // Tesla mantiene el motor incremental/flicker-free original.
+            displayDrawHeader();
+            displayDrawSourceCard();
+            displayDrawMetricCards();
+            displayDrawFooter();
+            displayDrawDeviceList();
+            uiStaticDrawn = true;
+            break;
+    }
+}
+
 void displayUpdate() {
     if (!displayInitialized) return;
 
@@ -868,51 +916,8 @@ void displayUpdate() {
     if (now - displayLastUpdate < DISPLAY_UPDATE_INTERVAL) return;
     displayLastUpdate = now;
 
-    if (!uiStaticDrawn) {
-        tft.fillScreen(UI_BG);
-        displayDrawHeader();
-        displayDrawSourceCard();
-        displayDrawMetricCards();
-        displayDrawFooter();
-        displayDrawDeviceList();
-        uiStaticDrawn = true;
-        uiLastAts = (int)atsState;
-        uiLastPzemValid = pzemData.isValid;
-        return;
-    }
-
-    // Header solo se actualiza cuando cambia la conectividad o cada minuto.
-    static int lastWifi = -1;
-    static int lastMinute = -1;
-    int wifiNow = (WiFi.status() == WL_CONNECTED) ? 1 : 0;
-    time_t epoch = time(nullptr);
-    int minuteNow = -1;
-    if (epoch > 100000) {
-        struct tm ti;
-        localtime_r(&epoch, &ti);
-        minuteNow = ti.tm_min;
-    }
-    if (wifiNow != lastWifi || minuteNow != lastMinute) {
-        displayDrawHeader();
-        lastWifi = wifiNow;
-        lastMinute = minuteNow;
-    }
-
-    int currentAts = (int)atsState;
-    if (currentAts != uiLastAts || pzemData.isValid != uiLastPzemValid) {
-        displayDrawSourceCard();
-        uiLastAts = currentAts;
-        uiLastPzemValid = pzemData.isValid;
-    } else {
-        // Actualiza solamente los valores dinámicos.
-        displayDrawSourceCard();
-    }
-
-    displayDrawMetricCards();
-    displayDrawFooter();
-    displayDrawDeviceList();
+    displayRenderCurrentTheme();
 }
-
 void displayShowMessage(const String& message, int duration) {
     if (!displayInitialized) return;
 
@@ -2075,6 +2080,327 @@ String getJsonData() {
 // ============================================
 // WEB SERVER ROUTES
 // ============================================
+
+// ============================================
+// THEME ENGINE - 6 INTERFACES
+// ============================================
+
+String themeSourceName() {
+    if (!pzemData.isValid) return "SIN DATOS";
+    if (atsState == ATS_UTILITY_POWER) return "RED ELECTRICA";
+    if (atsState == ATS_GENERATOR_POWER) return "GENERADOR";
+    return "DESCONOCIDO";
+}
+
+uint16_t themeSourceColor() {
+    if (!pzemData.isValid) return UI_RED;
+    if (atsState == ATS_UTILITY_POWER) return UI_GREEN;
+    if (atsState == ATS_GENERATOR_POWER) return UI_ORANGE;
+    return UI_RED;
+}
+
+String themePower() {
+    return pzemData.isValid ? String((int)round(pzemData.power)) + " W" : "-- W";
+}
+
+String themeVoltage() {
+    return pzemData.isValid ? String(pzemData.voltage, 1) + " V" : "-- V";
+}
+
+String themeCurrent() {
+    return pzemData.isValid ? String(pzemData.current, 2) + " A" : "-- A";
+}
+
+String themePF() {
+    return pzemData.isValid ? String(pzemData.pf, 2) : "--";
+}
+
+String themeFrequency() {
+    return pzemData.isValid ? String(pzemData.frequency, 1) + " Hz" : "-- Hz";
+}
+
+String themeEnergy() {
+    return pzemData.isValid ? String(pzemData.energy / 1000.0, 2) + " kWh" : "-- kWh";
+}
+
+void themeHeader(const String& title, uint16_t bg, uint16_t accent, uint16_t text, uint16_t muted) {
+    tft.fillRect(0, 0, DISPLAY_WIDTH, 31, bg);
+    tft.drawFastHLine(0, 30, DISPLAY_WIDTH, accent);
+    tft.setTextSize(2);
+    tft.setTextColor(text, bg);
+    tft.setCursor(7, 6);
+    tft.print(title);
+
+    tft.setTextSize(1);
+    tft.setTextColor(muted, bg);
+    tft.setCursor(216, 6);
+    tft.print("T");
+    tft.print(currentTheme + 1);
+    tft.print("/6");
+
+    bool wifiOk = WiFi.status() == WL_CONNECTED;
+    tft.fillCircle(290, 10, 4, wifiOk ? UI_GREEN : UI_RED);
+    tft.setTextColor(wifiOk ? UI_GREEN : UI_RED, bg);
+    tft.setCursor(298, 6);
+    tft.print(wifiOk ? "OK" : "NO");
+}
+
+void themeFooter(uint16_t bg, uint16_t muted) {
+    tft.fillRect(0, 219, 320, 21, bg);
+    tft.setTextSize(1);
+    tft.setTextColor(muted, bg);
+    tft.setCursor(6, 224);
+    tft.print("CYD Power  |  ");
+    tft.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi");
+    tft.setCursor(254, 224);
+    tft.print("T");
+    tft.print(currentTheme + 1);
+}
+
+void themeCoreMetrics(uint16_t bg, uint16_t panel, uint16_t text, uint16_t muted, uint16_t accent) {
+    // Bloque de potencia
+    tft.fillRoundRect(6, 38, 190, 78, 8, panel);
+    tft.drawRoundRect(6, 38, 190, 78, 8, accent);
+    tft.setTextSize(1);
+    tft.setTextColor(muted, panel);
+    tft.setCursor(15, 47);
+    tft.print("POTENCIA ACTIVA");
+
+    tft.setTextSize(3);
+    tft.setTextColor(text, panel);
+    tft.setCursor(14, 62);
+    tft.print(themePower());
+
+    tft.setTextSize(1);
+    tft.setTextColor(themeSourceColor(), panel);
+    tft.setCursor(15, 101);
+    tft.print(themeSourceName());
+
+    // Estado ATS
+    tft.fillRoundRect(203, 38, 111, 78, 8, panel);
+    tft.drawRoundRect(203, 38, 111, 78, 8, themeSourceColor());
+    tft.setTextSize(1);
+    tft.setTextColor(muted, panel);
+    tft.setCursor(212, 47);
+    tft.print("ATS");
+
+    tft.setTextSize(1);
+    tft.setTextColor(themeSourceColor(), panel);
+    tft.setCursor(212, 62);
+    tft.print(themeSourceName());
+
+    tft.setTextColor(text, panel);
+    tft.setCursor(212, 79);
+    tft.print(formatDuration(atsGetTimeInState()));
+
+    tft.setTextColor(muted, panel);
+    tft.setCursor(212, 98);
+    tft.print("ESTADO ACTIVO");
+}
+
+void themeFourMetrics(uint16_t bg, uint16_t panel, uint16_t text, uint16_t muted, uint16_t accent) {
+    const int xs[4] = {6, 85, 164, 243};
+    const char* labels[4] = {"VOLTAJE", "CORRIENTE", "PF", "FRECUENCIA"};
+    String values[4] = {themeVoltage(), themeCurrent(), themePF(), themeFrequency()};
+
+    for (int i = 0; i < 4; i++) {
+        tft.fillRoundRect(xs[i], 123, 71, 47, 6, panel);
+        tft.drawRoundRect(xs[i], 123, 71, 47, 6, accent);
+        tft.setTextSize(1);
+        tft.setTextColor(muted, panel);
+        tft.setCursor(xs[i] + 6, 130);
+        tft.print(labels[i]);
+        tft.setTextColor(text, panel);
+        tft.setTextSize(1);
+        tft.setCursor(xs[i] + 6, 148);
+        tft.print(values[i]);
+    }
+}
+
+void themeEnergyBar(uint16_t bg, uint16_t panel, uint16_t text, uint16_t muted, uint16_t accent) {
+    tft.fillRoundRect(6, 178, 308, 35, 7, panel);
+    tft.drawRoundRect(6, 178, 308, 35, 7, accent);
+    tft.setTextSize(1);
+    tft.setTextColor(muted, panel);
+    tft.setCursor(14, 185);
+    tft.print("ENERGIA ACUMULADA");
+    tft.setTextColor(text, panel);
+    tft.setCursor(14, 200);
+    tft.print(themeEnergy());
+    tft.setTextColor(muted, panel);
+    tft.setCursor(205, 200);
+    tft.print("ATS ");
+    tft.print(formatDuration(atsGetTimeInState()));
+}
+
+void themeDrawSCADA() {
+    const uint16_t bg = 0x0000, panel = 0x18C3, text = UI_WHITE, muted = 0x8410, accent = UI_GREEN;
+    tft.fillScreen(bg);
+    themeHeader("SCADA", bg, accent, text, muted);
+    themeCoreMetrics(bg, panel, text, muted, accent);
+    themeFourMetrics(bg, panel, text, muted, accent);
+    themeEnergyBar(bg, panel, text, muted, accent);
+    themeFooter(bg, muted);
+}
+
+void themeDrawMinimal() {
+    const uint16_t bg = 0xFFFF, panel = 0xFFFF, text = 0x0000, muted = 0x5AEB, accent = 0x001F;
+    tft.fillScreen(bg);
+    tft.setTextSize(2);
+    tft.setTextColor(text, bg);
+    tft.setCursor(8, 7);
+    tft.print("CYD Power");
+    tft.setTextSize(1);
+    tft.setTextColor(muted, bg);
+    tft.setCursor(252, 10);
+    tft.print("T2");
+
+    tft.setTextSize(1);
+    tft.setTextColor(muted, bg);
+    tft.setCursor(10, 40);
+    tft.print("POTENCIA");
+    tft.setTextSize(4);
+    tft.setTextColor(text, bg);
+    tft.setCursor(8, 53);
+    tft.print(pzemData.isValid ? String((int)round(pzemData.power)) : "--");
+    tft.setTextSize(1);
+    tft.print(" W");
+
+    tft.drawFastHLine(8, 101, 304, 0xBDF7);
+    String vals[4] = {themeVoltage(), themeCurrent(), themeFrequency(), themeEnergy()};
+    const char* labels[4] = {"VOLT", "AMP", "HZ", "KWH"};
+    for (int i=0;i<4;i++) {
+        int x = 8 + (i%2)*156, y = 112 + (i/2)*38;
+        tft.setTextSize(1);
+        tft.setTextColor(muted, bg);
+        tft.setCursor(x,y);
+        tft.print(labels[i]);
+        tft.setTextColor(text, bg);
+        tft.setCursor(x+35,y);
+        tft.print(vals[i]);
+    }
+    tft.setTextColor(themeSourceColor(), bg);
+    tft.setCursor(8, 199);
+    tft.print(themeSourceName());
+    tft.setTextColor(muted, bg);
+    tft.setCursor(8, 222);
+    tft.print("Tema 2  |  ");
+    tft.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi");
+}
+
+void themeDrawCyberpunk() {
+    const uint16_t bg = 0x1008, panel = 0x210A, text = UI_WHITE, muted = 0xA0B0, accent = 0xF81F;
+    tft.fillScreen(bg);
+    themeHeader("CYBER//POWER", bg, accent, text, muted);
+
+    tft.drawRect(4, 36, 312, 181, accent);
+    tft.drawFastHLine(4, 116, 316, 0x07FF);
+    tft.drawFastVLine(199, 36, 181, 0x07FF);
+
+    tft.setTextSize(1);
+    tft.setTextColor(0x07FF, bg);
+    tft.setCursor(12, 45); tft.print("> POWER");
+    tft.setTextSize(3);
+    tft.setTextColor(text, bg);
+    tft.setCursor(11, 60);
+    tft.print(themePower());
+
+    tft.setTextSize(1);
+    tft.setTextColor(themeSourceColor(), bg);
+    tft.setCursor(12, 101);
+    tft.print("["); tft.print(themeSourceName()); tft.print("]");
+
+    tft.setTextColor(0x07FF, bg);
+    tft.setCursor(210,45); tft.print("> SYSTEM");
+    tft.setTextColor(text, bg);
+    tft.setCursor(210,61); tft.print("V "); tft.print(themeVoltage());
+    tft.setCursor(210,77); tft.print("A "); tft.print(themeCurrent());
+    tft.setCursor(210,93); tft.print("PF "); tft.print(themePF());
+
+    tft.setTextColor(0x07FF, bg);
+    tft.setCursor(12, 128); tft.print("> TELEMETRY");
+    tft.setTextColor(text, bg);
+    tft.setCursor(12,145); tft.print("FREQ "); tft.print(themeFrequency());
+    tft.setCursor(12,161); tft.print("ENERGY "); tft.print(themeEnergy());
+    tft.setCursor(12,177); tft.print("ATS "); tft.print(formatDuration(atsGetTimeInState()));
+
+    tft.setTextColor(0x07FF, bg);
+    tft.setCursor(210,128); tft.print("> NET");
+    tft.setTextColor(text, bg);
+    tft.setCursor(210,145); tft.print(WiFi.status()==WL_CONNECTED ? "ONLINE" : "OFFLINE");
+    tft.setCursor(210,161); tft.print("THEME 03");
+    tft.setTextColor(muted, bg);
+    tft.setCursor(8, 224); tft.print("SYS://CYD_POWER_MONITOR");
+}
+
+void themeDrawRetro() {
+    const uint16_t bg = 0x0000, panel = 0x0000, text = 0x07E0, muted = 0x03E0, accent = 0x07E0;
+    tft.fillScreen(bg);
+    tft.drawRect(3,3,314,234,accent);
+    tft.setTextSize(1);
+    tft.setTextColor(text,bg);
+    tft.setCursor(9,10);
+    tft.print("CYD_POWER_MONITOR.EXE  [T4]");
+    tft.drawFastHLine(7,22,306,accent);
+
+    tft.setCursor(9,32); tft.print("> STATUS: ");
+    tft.print(themeSourceName());
+    tft.setCursor(9,47); tft.print("> POWER : "); tft.print(themePower());
+    tft.setCursor(9,62); tft.print("> VOLT  : "); tft.print(themeVoltage());
+    tft.setCursor(9,77); tft.print("> AMP   : "); tft.print(themeCurrent());
+    tft.setCursor(9,92); tft.print("> PF    : "); tft.print(themePF());
+    tft.setCursor(9,107); tft.print("> FREQ  : "); tft.print(themeFrequency());
+    tft.setCursor(9,122); tft.print("> ENERGY: "); tft.print(themeEnergy());
+    tft.setCursor(9,137); tft.print("> ATS   : "); tft.print(formatDuration(atsGetTimeInState()));
+
+    tft.drawFastHLine(7,151,306,accent);
+    tft.setCursor(9,160); tft.print("> NETWORK");
+    tft.setCursor(9,175); tft.print("> WIFI  : ");
+    tft.print(WiFi.status()==WL_CONNECTED ? "CONNECTED" : "OFFLINE");
+    tft.setCursor(9,190); tft.print("> IP    : ");
+    tft.print(WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : "---");
+    tft.setCursor(9,205); tft.print("> READY.");
+    tft.setCursor(9,224); tft.print("> press BOOT = next theme");
+}
+
+void themeDrawGlass() {
+    const uint16_t bg = 0x0821, panel = 0x2106, text = UI_WHITE, muted = 0xA534, accent = 0x5D7F;
+    tft.fillScreen(bg);
+
+    // Capas simuladas de glass en RGB565, ligeras para el ESP32.
+    tft.fillRoundRect(5,5,310,32,10,0x18A3);
+    tft.drawRoundRect(5,5,310,32,10,accent);
+    tft.setTextSize(2);
+    tft.setTextColor(text,0x18A3);
+    tft.setCursor(13,12); tft.print("CYD Power");
+    tft.setTextSize(1);
+    tft.setCursor(274,14); tft.print("T5");
+
+    tft.fillRoundRect(8,44,304,70,14,panel);
+    tft.drawRoundRect(8,44,304,70,14,accent);
+    tft.setTextSize(1);
+    tft.setTextColor(muted,panel); tft.setCursor(18,53); tft.print("LIVE POWER");
+    tft.setTextSize(3);
+    tft.setTextColor(text,panel); tft.setCursor(18,68); tft.print(themePower());
+    tft.setTextSize(1);
+    tft.setTextColor(themeSourceColor(),panel); tft.setCursor(204,76); tft.print(themeSourceName());
+
+    String labels[5] = {"VOLT","AMP","PF","HZ","KWH"};
+    String vals[5] = {themeVoltage(),themeCurrent(),themePF(),themeFrequency(),themeEnergy()};
+    for(int i=0;i<5;i++){
+        int x=7+i*62;
+        tft.fillRoundRect(x,123,57,67,10,0x18A3);
+        tft.drawRoundRect(x,123,57,67,10,accent);
+        tft.setTextSize(1); tft.setTextColor(muted,0x18A3); tft.setCursor(x+7,132); tft.print(labels[i]);
+        tft.setTextColor(text,0x18A3); tft.setCursor(x+7,151); tft.print(vals[i]);
+    }
+    tft.setTextColor(muted,bg);
+    tft.setCursor(8,205); tft.print("ATS ");
+    tft.setTextColor(themeSourceColor(),bg); tft.print(formatDuration(atsGetTimeInState()));
+    tft.setTextColor(muted,bg); tft.setCursor(220,205); tft.print("T5 GLASS");
+    tft.setCursor(8,224); tft.print(WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi");
+}
+
 #include "device_manager.h"
 #include "device_pages.h"
 
@@ -2277,6 +2603,54 @@ void webServerSetup() {
     });
 
     // Reboot endpoint
+    // Selector de temas: /theme?set=0..5
+    // Tambien permite abrir /theme desde el telefono para cambiar la apariencia.
+    server.on("/theme", HTTP_GET, []() {
+        if (server.hasArg("set")) {
+            int requested = server.arg("set").toInt();
+            if (requested >= 0 && requested <= 5) {
+                uiSetTheme((uint8_t)requested);
+            }
+            server.sendHeader("Location", "/theme");
+            server.send(303, "text/plain", "");
+            return;
+        }
+
+        String page;
+        page.reserve(5000);
+        page += F("<!doctype html><html lang='es'><head><meta name='viewport' content='width=device-width,initial-scale=1'>");
+        page += F("<title>CYD Power - Temas</title><style>");
+        page += F("body{margin:0;background:#0a0e17;color:#e5e7eb;font-family:Arial,sans-serif;padding:20px}");
+        page += F("h1{color:#00d4ff} .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}");
+        page += F("a{display:block;text-decoration:none;color:#fff;background:#111827;border:1px solid #334155;border-radius:12px;padding:22px;text-align:center}");
+        page += F("a.active{border:2px solid #00d4ff;background:#172033}.n{font-size:1.1em;font-weight:bold}.s{font-size:.8em;color:#94a3b8;margin-top:6px}");
+        page += F("</style></head><body><h1>CYD Power Monitor</h1><p>Tema actual: <b>");
+        page += uiThemeName(currentTheme);
+        page += F("</b></p><div class='grid'>");
+
+        for (int i = 0; i < 6; i++) {
+            page += "<a class='";
+            if (i == currentTheme) page += "active";
+            page += "' href='/theme?set=";
+            page += String(i);
+            page += "'><div class='n'>";
+            page += String(i + 1);
+            page += ". ";
+            page += uiThemeName(i);
+            page += F("</div><div class='s'>Tocar para aplicar</div></a>");
+        }
+
+        page += F("</div><p style='margin-top:24px'><a href='/' style='display:inline-block;padding:12px 18px'>← Dashboard</a></p>");
+        page += F("</body></html>");
+        server.send(200, "text/html; charset=utf-8", page);
+    });
+
+    server.on("/api/theme", HTTP_GET, []() {
+        String json = "{\"theme\":" + String(currentTheme) +
+                      ",\"name\":\"" + String(uiThemeName(currentTheme)) + "\"}";
+        server.send(200, "application/json", json);
+    });
+
     server.on("/reboot", HTTP_POST, []() {
         if (!checkRateLimit()) {
             server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
@@ -2417,6 +2791,8 @@ void setup() {
     
     // Display
     displayBegin();
+    uiLoadTheme();
+    Serial.println("Theme loaded: " + String(uiThemeName(currentTheme)));
     tft.fillScreen(COLOR_BG);
     tft.setTextColor(COLOR_CYAN);
     tft.setTextSize(2);
