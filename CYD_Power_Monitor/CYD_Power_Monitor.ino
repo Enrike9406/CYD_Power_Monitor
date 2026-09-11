@@ -59,7 +59,7 @@
 #define DEBUG_BAUD_RATE 115200
 #define WEB_REFRESH_INTERVAL 5
 #define BOOT_RESET_HOLD_TIME 5000
-#define FIRMWARE_VERSION "2.1"
+#define FIRMWARE_VERSION "2.2-TeslaUI"
 #define MAX_HISTORY_ENTRIES 300
 #define HISTORY_SAVE_INTERVAL 60000
 #define SCHEDULER_CHECK_INTERVAL 3000
@@ -620,279 +620,446 @@ String pzemGetStatusString() {
 }
 
 // ============================================
-// DISPLAY
+// DISPLAY - TEMA 6: TESLA / APP MODERNA
+// Optimizado para CYD ESP32-2432S028 (320x240)
 // ============================================
-bool displayBegin() {
+
+const uint16_t UI_BG       = 0x10A2; // #121212 aprox.
+const uint16_t UI_PANEL    = 0x2104; // #202020 aprox.
+const uint16_t UI_PANEL2   = 0x2945; // #282828 aprox.
+const uint16_t UI_BLUE     = 0x3B8F; // azul brillante
+const uint16_t UI_BLUE2    = 0x1C9F; // azul secundario
+const uint16_t UI_GREEN    = 0x07E0;
+const uint16_t UI_ORANGE   = 0xFD20;
+const uint16_t UI_RED      = 0xF800;
+const uint16_t UI_WHITE    = 0xFFFF;
+const uint16_t UI_GRAY     = 0x8410;
+const uint16_t UI_MUTED    = 0x5AEB;
+const uint16_t UI_LINE     = 0x39C7;
+
+static bool uiStaticDrawn = false;
+static int uiLastAts = -1;
+static bool uiLastPzemValid = false;
+static String uiLastPower = "";
+static String uiLastVoltage = "";
+static String uiLastCurrent = "";
+static String uiLastPF = "";
+static String uiLastFreq = "";
+static String uiLastEnergy = "";
+static String uiLastUptime = "";
+static String uiLastWifi = "";
+static String uiLastIp = "";
+static String uiLastDeviceSignature = "";
+
+void uiResetDrawState() {
+    uiStaticDrawn = false;
+    uiLastAts = -1;
+    uiLastPzemValid = false;
+    uiLastPower = "";
+    uiLastVoltage = "";
+    uiLastCurrent = "";
+    uiLastPF = "";
+    uiLastFreq = "";
+    uiLastEnergy = "";
+    uiLastUptime = "";
+    uiLastWifi = "";
+    uiLastIp = "";
+    uiLastDeviceSignature = "";
+}
+
+void uiText(int x, int y, const String& text, uint16_t color, uint8_t size = 1) {
+    tft.setTextSize(size);
+    tft.setTextColor(color, UI_PANEL);
+    tft.setCursor(x, y);
+    tft.print(text);
+}
+
+void uiClearValue(int x, int y, int w, int h, uint16_t bg = UI_PANEL) {
+    tft.fillRect(x, y, w, h, bg);
+}
+
+void displayBegin() {
     tft.init();
     tft.setRotation(DISPLAY_ORIENTATION);
-    
+
     // Fix gamma issue for CYD2USB (ILI9341_GAMMASET = 0x26)
     tft.writecommand(0x26);
     tft.writedata(2);
     delay(120);
     tft.writecommand(0x26);
     tft.writedata(1);
-    
-    tft.fillScreen(COLOR_BG);
+
+    tft.fillScreen(UI_BG);
     tft.setTextFont(2);
     displayInitialized = true;
-    Serial.println("Display initialized (CYD2USB gamma fix applied)");
-    return true;
+    uiResetDrawState();
+    Serial.println("Display initialized - Tesla/App UI");
 }
 
-// Cabecera elegante con gradiente sutil
 void displayDrawHeader() {
-    // Fondo plano, dibujado UNA sola vez (no en cada ciclo). El degradado
-    // anterior se recalculaba entero cada 1.5s -> era la causa principal del
-    // parpadeo, y como los rectangulos de "borrado" del texto usaban un color
-    // plano que no coincidia con el degradado en esa altura, dejaban un
-    // parche visible mas oscuro (el "pedazo en negro" de la fecha).
-    static bool headerBgDrawn = false;
-    if (!headerBgDrawn) {
-        tft.fillRect(0, 0, DISPLAY_WIDTH, HEADER_HEIGHT, COLOR_BG_ALT);
-        tft.drawFastHLine(0, HEADER_HEIGHT - 1, DISPLAY_WIDTH, COLOR_GREEN);
-        headerBgDrawn = true;
-    }
+    // Cabecera: logo + estado WiFi + hora.
+    tft.fillRect(0, 0, DISPLAY_WIDTH, 34, UI_PANEL);
+    tft.drawFastHLine(0, 33, DISPLAY_WIDTH, UI_LINE);
+
+    tft.setTextSize(2);
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.setCursor(8, 7);
+    tft.print("CYD");
+    tft.setTextColor(UI_BLUE, UI_PANEL);
+    tft.print(" Power");
+
+    bool wifiOk = (WiFi.status() == WL_CONNECTED);
+    tft.fillCircle(257, 12, 5, wifiOk ? UI_GREEN : UI_RED);
+    tft.setTextSize(1);
+    tft.setTextColor(wifiOk ? UI_GREEN : UI_RED, UI_PANEL);
+    tft.setCursor(267, 8);
+    tft.print(wifiOk ? "ONLINE" : "OFFLINE");
 
     time_t nowEpoch = time(nullptr);
-    char timeBuf[10] = "--:--";
-    char dateBuf[12] = "";
-    bool hasTime = (nowEpoch > 100000);
-    if (hasTime) {
+    char timeBuf[8] = "--:--";
+    if (nowEpoch > 100000) {
         struct tm ti;
         localtime_r(&nowEpoch, &ti);
         strftime(timeBuf, sizeof(timeBuf), "%H:%M", &ti);
-        strftime(dateBuf, sizeof(dateBuf), "%d %b", &ti);
     }
-
-    // Hora - solo se borra/redibuja si el texto realmente cambio (una vez por
-    // minuto), no en cada ciclo. Tamano reducido (2 en vez de 3) y area de
-    // borrado con bastante margen de sobra, para eliminar cualquier riesgo
-    // de que se corte un digito.
-    static String lastTime = "";
-    String timeStr = String(timeBuf);
-    if (timeStr != lastTime) {
-        tft.fillRect(4, 4, 100, 26, COLOR_BG_ALT);
-        tft.setTextColor(COLOR_CYAN);
-        tft.setTextSize(2);
-        tft.setCursor(10, 8);
-        tft.print(timeBuf);
-        lastTime = timeStr;
-    }
-
-    // Indicador WiFi - solo se redibuja si cambio conectado/desconectado
-    static int lastWifiOk = -1;
-    bool wifiOk = (WiFi.status() == WL_CONNECTED);
-    if ((int)wifiOk != lastWifiOk) {
-        uint16_t wifiColor = wifiOk ? COLOR_GREEN : COLOR_RED;
-        tft.fillCircle(DISPLAY_WIDTH - 90, 14, 8, COLOR_BG_ALT); // borra el halo anterior
-        tft.fillCircle(DISPLAY_WIDTH - 90, 14, 6, wifiColor);
-        tft.fillCircle(DISPLAY_WIDTH - 90, 14, 3, COLOR_WHITE);
-        lastWifiOk = (int)wifiOk;
-    }
-
-    // Fecha - solo se borra/redibuja si cambio (una vez al dia). Separada del
-    // indicador WiFi por suficiente margen para que no se toquen entre si.
-    static String lastDate = "";
-    String dateStr = hasTime ? String(dateBuf) : String("sin hora");
-    if (dateStr != lastDate) {
-        tft.fillRect(DISPLAY_WIDTH - 70, 4, 66, 24, COLOR_BG_ALT);
-        tft.setTextColor(COLOR_WHITE);
-        tft.setTextSize(1);
-        tft.setCursor(DISPLAY_WIDTH - 66, 16);
-        tft.print(dateStr);
-        lastDate = dateStr;
-    }
+    tft.setTextColor(UI_MUTED, UI_PANEL);
+    tft.setCursor(268, 20);
+    tft.print(timeBuf);
 }
 
-// Ancho fijo por caracter para borrar/redibujar solo la zona de un valor,
-// evitando parpadeo/manchas. bgColor debe coincidir con la superficie real
-// donde se dibuja (COLOR_CARD dentro de una tarjeta, COLOR_BG en el fondo
-// general) - si no coincide, queda un parche de color distinto visible.
-void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t color, uint16_t bgColor = COLOR_BG, int clearH = 20) {
-    int neededW = val.length() * 12; // 12px por caracter en textSize 1
-    if (neededW > clearW) clearW = neededW;
-    tft.fillRect(x, y, clearW, clearH, bgColor);
-    tft.setTextColor(color);
-    tft.setCursor(x, y);
-    tft.print(val);
-}
-
-// Panel principal de potencia y estado ATS
 void displayDrawSourceCard() {
-    const int cardX = 5, cardY = 36, cardW = DISPLAY_WIDTH - 10, cardH = 94;
-    const int bandY = cardY + 4;
-    const int bandH = 18;
-    const int col1X = cardX + 10;
-    const int col2X = cardX + cardW / 2 + 6;
-    const int row1Y = bandY + bandH + 10;
-    const int row2Y = row1Y + 32; // bastante espacio de sobra entre filas
+    // Panel principal: potencia + fuente ATS + V/A/PF.
+    const int x = 6, y = 39, w = 308, h = 69;
 
-    // Fondo, borde y etiquetas fijas - dibujados UNA sola vez.
-    static bool cardStaticDrawn = false;
-    if (!cardStaticDrawn) {
-        tft.fillRoundRect(cardX, cardY, cardW, cardH, 6, COLOR_CARD);
-        tft.drawRoundRect(cardX, cardY, cardW, cardH, 6, COLOR_BORDER);
-
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_MUTED);
-        tft.setCursor(col1X, row1Y);
-        tft.print("VOLTAJE");
-        tft.setCursor(col2X, row1Y);
-        tft.print("AMPERAJE");
-        tft.setCursor(col1X, row2Y);
-        tft.print("POTENCIA");
-        tft.setCursor(col2X, row2Y);
-        tft.print("FRECUENCIA");
-
-        cardStaticDrawn = true;
+    // Fondo y marco se dibujan una sola vez para evitar parpadeo.
+    if (!uiStaticDrawn) {
+        tft.fillRoundRect(x, y, w, h, 8, UI_PANEL);
+        tft.drawRoundRect(x, y, w, h, 8, UI_LINE);
     }
 
     bool valid = pzemData.isValid;
-    float watts = valid ? pzemData.power : 0;
-
-    uint16_t stateColor;
-    String stateLabel;
-    if (!valid) { stateColor = COLOR_DARK_GRAY; stateLabel = "SIN DATOS"; }
-    else if (atsState == ATS_UTILITY_POWER) { stateColor = COLOR_GREEN; stateLabel = "RED ELECTRICA"; }
-    else if (atsState == ATS_GENERATOR_POWER) { stateColor = COLOR_ORANGE; stateLabel = "GENERADOR"; }
-    else { stateColor = COLOR_RED; stateLabel = "FUENTE DESCONOCIDA"; }
-
-    // Banda de estado ATS - solo se redibuja si la fuente activa cambio
-    static String lastBandLabel = "";
-    if (stateLabel != lastBandLabel) {
-        tft.fillRoundRect(cardX + 4, bandY, cardW - 8, bandH, 3, stateColor);
-        tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE);
-        tft.setCursor(cardX + 10, bandY + 5);
-        tft.print(stateLabel);
-        lastBandLabel = stateLabel;
+    uint16_t sourceColor = UI_RED;
+    String source = "SIN DATOS";
+    if (valid && atsState == ATS_UTILITY_POWER) {
+        sourceColor = UI_GREEN;
+        source = "RED ELECTRICA";
+    } else if (valid && atsState == ATS_GENERATOR_POWER) {
+        sourceColor = UI_ORANGE;
+        source = "GENERADOR";
     }
 
-    // Los 4 valores - ancho y alto de borrado generosos (antes 16px de alto
-    // exacto para texto de 16px, sin margen; ahora 20px de margen real).
-    tft.setTextSize(2);
-    String vStr = valid ? String(pzemData.voltage, 0) + "V" : "-- V";
-    displayPrintValue(col1X, row1Y + 10, 70, vStr, COLOR_CYAN, COLOR_CARD, 20);
+    // Fuente activa: solo se redibuja cuando cambia.
+    static String lastSource = "";
+    if (source != lastSource || !uiStaticDrawn) {
+        tft.fillRoundRect(x + 10, y + 8, 116, 17, 8, sourceColor);
+        tft.setTextSize(1);
+        tft.setTextColor(UI_WHITE, sourceColor);
+        tft.setCursor(x + 18, y + 13);
+        tft.print(source);
+        lastSource = source;
+    }
 
-    String aStr = valid ? String(pzemData.current, 1) + "A" : "-- A";
-    displayPrintValue(col2X, row1Y + 10, 70, aStr, COLOR_CYAN, COLOR_CARD, 20);
+    // Potencia principal
+    String power = valid ? String((int)round(pzemData.power)) : "--";
+    if (power != uiLastPower || !uiStaticDrawn) {
+        uiClearValue(x + 136, y + 5, 105, 32, UI_PANEL);
+        tft.setTextSize(3);
+        tft.setTextColor(UI_WHITE, UI_PANEL);
+        tft.setCursor(x + 136, y + 5);
+        tft.print(power);
+        tft.setTextSize(1);
+        tft.setTextColor(UI_MUTED, UI_PANEL);
+        tft.setCursor(x + 244, y + 17);
+        tft.print("W");
+        uiLastPower = power;
+    }
 
-    String wStr = valid ? String((int)watts) + "W" : "-- W";
-    displayPrintValue(col1X, row2Y + 10, 70, wStr, COLOR_WHITE, COLOR_CARD, 20);
+    // V / A / PF en la parte inferior.
+    String v = valid ? String(pzemData.voltage, 1) + "V" : "-- V";
+    String a = valid ? String(pzemData.current, 2) + "A" : "-- A";
+    String pf = valid ? String(pzemData.pf, 2) : "--";
 
-    String fStr = valid ? String(pzemData.frequency, 1) + "Hz" : "-- Hz";
-    displayPrintValue(col2X, row2Y + 10, 70, fStr, COLOR_WHITE, COLOR_CARD, 20);
+    if (v != uiLastVoltage || !uiStaticDrawn) {
+        uiClearValue(x + 12, y + 42, 70, 18);
+        uiText(x + 12, y + 44, v, UI_BLUE, 1);
+        uiLastVoltage = v;
+    }
+    if (a != uiLastCurrent || !uiStaticDrawn) {
+        uiClearValue(x + 92, y + 42, 75, 18);
+        uiText(x + 92, y + 44, a, UI_BLUE, 1);
+        uiLastCurrent = a;
+    }
+    if (pf != uiLastPF || !uiStaticDrawn) {
+        uiClearValue(x + 177, y + 42, 70, 18);
+        uiText(x + 177, y + 44, "PF " + pf, UI_MUTED, 1);
+        uiLastPF = pf;
+    }
+
+    // Temporizador ATS
+    String atsTime = formatDuration(atsGetTimeInState());
+    uiClearValue(x + 242, y + 42, 58, 18);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_PANEL);
+    tft.setCursor(x + 242, y + 44);
+    tft.print(atsTime);
 }
 
-// Barra de estado inferior
-void displayDrawFooter() {
-    const int footerY = DISPLAY_HEIGHT - FOOTER_HEIGHT;
+void displayDrawMetricCards() {
+    // Cuatro indicadores compactos, estilo app.
+    const int y = 114;
+    const int gap = 6;
+    const int w = 151;
+    const int h = 43;
 
-    static bool footerStaticDrawn = false;
-    if (!footerStaticDrawn) {
-        tft.fillRect(0, footerY, DISPLAY_WIDTH, FOOTER_HEIGHT, COLOR_BG_ALT);
-        tft.drawFastHLine(0, footerY, DISPLAY_WIDTH, COLOR_BORDER);
+    if (!uiStaticDrawn) {
+        tft.fillRoundRect(6, y, w, h, 7, UI_PANEL);
+        tft.fillRoundRect(163, y, w, h, 7, UI_PANEL);
+        tft.drawRoundRect(6, y, w, h, 7, UI_LINE);
+        tft.drawRoundRect(163, y, w, h, 7, UI_LINE);
+
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_MUTED);
-        tft.setCursor(6, footerY + 6);
-        tft.print("v" + String(FIRMWARE_VERSION));
-        footerStaticDrawn = true;
+        tft.setTextColor(UI_MUTED, UI_PANEL);
+        tft.setCursor(14, y + 7);
+        tft.print("FRECUENCIA");
+        tft.setCursor(171, y + 7);
+        tft.print("ENERGIA");
     }
 
-    // Estado PZEM - solo redibuja si cambio
-    static bool lastPzemValid = false;
-    static bool firstPzemDraw = true;
-    if (firstPzemDraw || pzemData.isValid != lastPzemValid) {
-        displayPrintValue(50, footerY + 6, 60, pzemData.isValid ? "PZEM: OK" : "PZEM: --", COLOR_MUTED, COLOR_BG_ALT);
-        lastPzemValid = pzemData.isValid;
-        firstPzemDraw = false;
+    String freq = pzemData.isValid ? String(pzemData.frequency, 1) + " Hz" : "-- Hz";
+    String energy = pzemData.isValid ? String(pzemData.energy / 1000.0, 2) + " kWh" : "-- kWh";
+
+    if (freq != uiLastFreq || !uiStaticDrawn) {
+        uiClearValue(14, y + 20, 130, 18);
+        uiText(14, y + 22, freq, UI_WHITE, 2);
+        uiLastFreq = freq;
+    }
+    if (energy != uiLastEnergy || !uiStaticDrawn) {
+        uiClearValue(171, y + 20, 130, 18);
+        uiText(171, y + 22, energy, UI_WHITE, 2);
+        uiLastEnergy = energy;
+    }
+}
+
+void displayDrawFooter() {
+    // Uptime e IP en una franja discreta.
+    const int y = 164;
+    tft.fillRect(0, y, DISPLAY_WIDTH, 16, UI_BG);
+
+    String uptime = formatDurationLong(millis() / 1000);
+    String ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "sin WiFi";
+
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setCursor(7, y + 4);
+    tft.print("UP ");
+    tft.print(uptime);
+
+    tft.setCursor(190, y + 4);
+    tft.print(ip);
+
+    uiLastUptime = uptime;
+    uiLastIp = ip;
+}
+
+void displayDrawDeviceList() {
+    // Hasta 4 dispositivos, manteniendo la pantalla limpia y legible.
+    const int startX = 7;
+    const int startY = 184;
+    const int rowH = 13;
+    const int maxRows = 4;
+
+    struct RowData {
+        String name;
+        bool state;
+        bool hasEnergy;
+        bool metricsValid;
+        float power;
+    };
+
+    RowData rows[maxRows];
+    int rowCount = 0;
+
+    if (devicesMutex != NULL) {
+        xSemaphoreTake(devicesMutex, portMAX_DELAY);
+        int n = min(deviceCount, maxRows);
+        for (int i = 0; i < n; i++) {
+            rows[i].name = devices[i].name;
+            rows[i].state = devices[i].state;
+            rows[i].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[i].metricsValid = devices[i].metricsValid;
+            rows[i].power = devices[i].lastPower;
+        }
+        rowCount = n;
+        xSemaphoreGive(devicesMutex);
     }
 
-    // Uptime - cambia todo el tiempo, pero solo se borra/redibuja su propia zona
-    displayPrintValue(110, footerY + 6, 90, formatDurationLong(millis() / 1000), COLOR_MUTED, COLOR_BG_ALT);
+    String signature = String(rowCount);
+    for (int i = 0; i < rowCount; i++) {
+        signature += "|" + rows[i].name + ":" + String(rows[i].state) + ":" +
+                     ((rows[i].hasEnergy && rows[i].metricsValid) ? String((int)rows[i].power) : String("-"));
+    }
 
-    // IP - solo redibuja si cambia el estado de conexion
-    static int lastWifiIpState = -1;
-    bool wifiOk = (WiFi.status() == WL_CONNECTED);
-    if ((int)wifiOk != lastWifiIpState) {
-        String ipStr = wifiOk ? WiFi.localIP().toString() : "sin conexion";
-        displayPrintValue(DISPLAY_WIDTH - 90, footerY + 6, 84, ipStr, COLOR_GREEN, COLOR_BG_ALT);
-        lastWifiIpState = (int)wifiOk;
+    if (signature == uiLastDeviceSignature && uiStaticDrawn) return;
+    uiLastDeviceSignature = signature;
+
+    tft.fillRect(0, startY - 2, DISPLAY_WIDTH, 58, UI_BG);
+
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setCursor(startX, startY - 1);
+    tft.print("DISPOSITIVOS");
+
+    if (rowCount == 0) {
+        tft.setTextColor(UI_GRAY, UI_BG);
+        tft.setCursor(startX, startY + 14);
+        tft.print("Sin dispositivos agregados");
+        return;
+    }
+
+    for (int i = 0; i < rowCount; i++) {
+        int y = startY + 12 + i * rowH;
+
+        if (i % 2 == 0) {
+            tft.fillRoundRect(startX, y, DISPLAY_WIDTH - 14, rowH - 1, 3, UI_PANEL);
+        }
+
+        uint16_t dotColor = rows[i].state ? UI_GREEN : UI_GRAY;
+        tft.fillCircle(startX + 7, y + 6, 3, dotColor);
+
+        String nm = rows[i].name;
+        if (nm.length() > 22) nm = nm.substring(0, 21) + ".";
+        tft.setTextColor(rows[i].state ? UI_WHITE : UI_MUTED, (i % 2 == 0) ? UI_PANEL : UI_BG);
+        tft.setTextSize(1);
+        tft.setCursor(startX + 16, y + 3);
+        tft.print(nm);
+
+        String val;
+        uint16_t valColor;
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            val = String((int)rows[i].power) + "W";
+            valColor = UI_BLUE;
+        } else {
+            val = rows[i].state ? "ON" : "OFF";
+            valColor = rows[i].state ? UI_GREEN : UI_GRAY;
+        }
+
+        tft.setTextColor(valColor, (i % 2 == 0) ? UI_PANEL : UI_BG);
+        int valX = DISPLAY_WIDTH - 45;
+        tft.setCursor(valX, y + 3);
+        tft.print(val);
     }
 }
 
 void displayUpdate() {
     if (!displayInitialized) return;
+
     unsigned long now = millis();
     if (now - displayLastUpdate < DISPLAY_UPDATE_INTERVAL) return;
     displayLastUpdate = now;
 
-    // Dibujar fondo de pantalla solo una vez (usamos flag estatico para
-    // no redibujar el fondo completo en cada ciclo, solo los elementos dinamicos)
-    static bool staticDrawn = false;
-    if (!staticDrawn) {
-        tft.fillScreen(COLOR_BG);
-        staticDrawn = true;
+    if (!uiStaticDrawn) {
+        tft.fillScreen(UI_BG);
+        displayDrawHeader();
+        displayDrawSourceCard();
+        displayDrawMetricCards();
+        displayDrawFooter();
+        displayDrawDeviceList();
+        uiStaticDrawn = true;
+        uiLastAts = (int)atsState;
+        uiLastPzemValid = pzemData.isValid;
+        return;
     }
 
-    // La hora en el header cambia cada minuto - se redibuja siempre pero es
-    // liviano (solo esa franja superior, no toda la pantalla)
-    displayDrawHeader();
-    displayDrawSourceCard();
-    displayDrawDeviceList();
+    // Header solo se actualiza cuando cambia la conectividad o cada minuto.
+    static int lastWifi = -1;
+    static int lastMinute = -1;
+    int wifiNow = (WiFi.status() == WL_CONNECTED) ? 1 : 0;
+    time_t epoch = time(nullptr);
+    int minuteNow = -1;
+    if (epoch > 100000) {
+        struct tm ti;
+        localtime_r(&epoch, &ti);
+        minuteNow = ti.tm_min;
+    }
+    if (wifiNow != lastWifi || minuteNow != lastMinute) {
+        displayDrawHeader();
+        lastWifi = wifiNow;
+        lastMinute = minuteNow;
+    }
+
+    int currentAts = (int)atsState;
+    if (currentAts != uiLastAts || pzemData.isValid != uiLastPzemValid) {
+        displayDrawSourceCard();
+        uiLastAts = currentAts;
+        uiLastPzemValid = pzemData.isValid;
+    } else {
+        // Actualiza solamente los valores dinámicos.
+        displayDrawSourceCard();
+    }
+
+    displayDrawMetricCards();
     displayDrawFooter();
+    displayDrawDeviceList();
 }
 
 void displayShowMessage(const String& message, int duration) {
     if (!displayInitialized) return;
-    tft.fillScreen(COLOR_BG);
-    tft.setTextColor(COLOR_WHITE);
+
+    tft.fillScreen(UI_BG);
+    tft.setTextColor(UI_WHITE, UI_BG);
     tft.setTextSize(2);
     tft.setTextWrap(true);
-    tft.setCursor(10, DISPLAY_HEIGHT / 2 - 10);
+    tft.setCursor(10, DISPLAY_HEIGHT / 2 - 20);
     tft.print(message);
     delay(duration);
+
+    // Obliga a reconstruir toda la interfaz al volver al dashboard.
+    uiResetDrawState();
 }
 
 void displayWiFiPortalInfo() {
     if (!displayInitialized) return;
-    tft.fillScreen(COLOR_BG);
-    tft.setTextColor(COLOR_YELLOW);
+
+    tft.fillScreen(UI_BG);
+    tft.setTextColor(UI_BLUE, UI_BG);
     tft.setTextSize(2);
     tft.setCursor(10, 10);
     tft.print("WiFi Setup");
-    tft.drawFastHLine(10, 32, DISPLAY_WIDTH - 20, COLOR_CYAN);
-    tft.setTextColor(COLOR_CYAN);
+
+    tft.drawFastHLine(10, 34, DISPLAY_WIDTH - 20, UI_LINE);
+
+    tft.setTextColor(UI_MUTED, UI_BG);
     tft.setTextSize(1);
-    tft.setCursor(10, 42);
-    tft.print("Connect to WiFi:");
-    tft.setTextColor(COLOR_WHITE);
+    tft.setCursor(10, 46);
+    tft.print("Conectate a la red:");
+
+    tft.setTextColor(UI_WHITE, UI_BG);
     tft.setTextSize(2);
-    tft.setCursor(10, 58);
+    tft.setCursor(10, 62);
     tft.print("CYD-Monitor-");
     tft.print(WiFi.macAddress().substring(15));
-    tft.setTextColor(COLOR_CYAN);
+
+    tft.setTextColor(UI_MUTED, UI_BG);
     tft.setTextSize(1);
-    tft.setCursor(10, 82);
-    tft.print("Then open browser:");
-    tft.setTextColor(COLOR_GREEN);
+    tft.setCursor(10, 94);
+    tft.print("Luego abre en el navegador:");
+
+    tft.setTextColor(UI_GREEN, UI_BG);
     tft.setTextSize(2);
-    tft.setCursor(10, 98);
+    tft.setCursor(10, 108);
     tft.print("192.168.4.1");
-    tft.drawFastHLine(10, 122, DISPLAY_WIDTH - 20, COLOR_CYAN);
-    tft.setTextColor(COLOR_WHITE);
+
+    tft.setTextColor(UI_WHITE, UI_BG);
     tft.setTextSize(1);
-    tft.setCursor(10, 132);
-    tft.print("Configure your home WiFi");
-    tft.setCursor(10, 148);
-    tft.print("network from the portal");
-    tft.setTextColor(COLOR_YELLOW);
-    tft.setCursor(10, 170);
-    tft.print("Firmware v");
-    tft.print(FIRMWARE_VERSION);
+    tft.setCursor(10, 142);
+    tft.print("Configura la red WiFi desde");
+    tft.setCursor(10, 156);
+    tft.print("el portal de configuracion.");
+
+    tft.setTextColor(UI_MUTED, UI_BG);
     tft.setCursor(10, 190);
-    tft.print("Waiting for connection...");
+    tft.print("CYD Power Monitor v");
+    tft.print(FIRMWARE_VERSION);
 }
 
 // ============================================
