@@ -666,15 +666,16 @@ void displayDrawHeader() {
     }
 
     // Hora - solo se borra/redibuja si el texto realmente cambio (una vez por
-    // minuto), no en cada ciclo. Area de borrado con margen extra de sobra
-    // para que nunca quede un digito cortado.
+    // minuto), no en cada ciclo. Tamano reducido (2 en vez de 3) y area de
+    // borrado con bastante margen de sobra, para eliminar cualquier riesgo
+    // de que se corte un digito.
     static String lastTime = "";
     String timeStr = String(timeBuf);
     if (timeStr != lastTime) {
-        tft.fillRect(4, 2, 120, 28, COLOR_BG_ALT);
+        tft.fillRect(4, 4, 100, 26, COLOR_BG_ALT);
         tft.setTextColor(COLOR_CYAN);
-        tft.setTextSize(3);
-        tft.setCursor(10, 4);
+        tft.setTextSize(2);
+        tft.setCursor(10, 8);
         tft.print(timeBuf);
         lastTime = timeStr;
     }
@@ -708,10 +709,10 @@ void displayDrawHeader() {
 // evitando parpadeo/manchas. bgColor debe coincidir con la superficie real
 // donde se dibuja (COLOR_CARD dentro de una tarjeta, COLOR_BG en el fondo
 // general) - si no coincide, queda un parche de color distinto visible.
-void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t color, uint16_t bgColor = COLOR_BG) {
+void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t color, uint16_t bgColor = COLOR_BG, int clearH = 20) {
     int neededW = val.length() * 12; // 12px por caracter en textSize 1
     if (neededW > clearW) clearW = neededW;
-    tft.fillRect(x, y, clearW, 16, bgColor);
+    tft.fillRect(x, y, clearW, clearH, bgColor);
     tft.setTextColor(color);
     tft.setCursor(x, y);
     tft.print(val);
@@ -719,17 +720,15 @@ void displayPrintValue(int x, int y, int clearW, const String& val, uint16_t col
 
 // Panel principal de potencia y estado ATS
 void displayDrawSourceCard() {
-    const int cardX = 5, cardY = 36, cardW = DISPLAY_WIDTH - 10, cardH = 70;
+    const int cardX = 5, cardY = 36, cardW = DISPLAY_WIDTH - 10, cardH = 94;
     const int bandY = cardY + 4;
     const int bandH = 18;
-    const int metricsY = bandY + bandH + 6;
-    const int metricW = (cardW - 24) / 3;
-    const int secY = metricsY + 24;
-    const int secW = (cardW - 24) / 3;
+    const int col1X = cardX + 10;
+    const int col2X = cardX + cardW / 2 + 6;
+    const int row1Y = bandY + bandH + 10;
+    const int row2Y = row1Y + 32; // bastante espacio de sobra entre filas
 
-    // Fondo, borde y etiquetas fijas - dibujados UNA sola vez. Antes se
-    // repintaba toda la tarjeta en cada ciclo (cada 1.5s), lo cual era la
-    // causa del parpadeo general de la pantalla.
+    // Fondo, borde y etiquetas fijas - dibujados UNA sola vez.
     static bool cardStaticDrawn = false;
     if (!cardStaticDrawn) {
         tft.fillRoundRect(cardX, cardY, cardW, cardH, 6, COLOR_CARD);
@@ -737,18 +736,14 @@ void displayDrawSourceCard() {
 
         tft.setTextSize(1);
         tft.setTextColor(COLOR_MUTED);
-        tft.setCursor(cardX + 8, metricsY);
+        tft.setCursor(col1X, row1Y);
         tft.print("VOLTAJE");
-        tft.setCursor(cardX + 8 + metricW, metricsY);
-        tft.print("CORRIENTE");
-        tft.setCursor(cardX + 8 + metricW * 2, metricsY);
+        tft.setCursor(col2X, row1Y);
+        tft.print("AMPERAJE");
+        tft.setCursor(col1X, row2Y);
         tft.print("POTENCIA");
-        tft.setCursor(cardX + 8, secY);
+        tft.setCursor(col2X, row2Y);
         tft.print("FRECUENCIA");
-        tft.setCursor(cardX + 8 + secW, secY);
-        tft.print("FACTOR POT.");
-        tft.setCursor(cardX + 8 + secW * 2, secY);
-        tft.print("ENERGIA");
 
         cardStaticDrawn = true;
     }
@@ -771,36 +766,23 @@ void displayDrawSourceCard() {
         tft.setTextColor(COLOR_WHITE);
         tft.setCursor(cardX + 10, bandY + 5);
         tft.print(stateLabel);
-        tft.setCursor(cardX + cardW - 34, bandY + 5);
-        if (atsState == ATS_UTILITY_POWER) tft.print("[I]");
-        else if (atsState == ATS_GENERATOR_POWER) tft.print("[G]");
-        else tft.print("[?]");
         lastBandLabel = stateLabel;
     }
 
-    // Metricas principales (V, A, W) - se redibujan siempre (los valores
-    // reales cambian casi cada ciclo), pero cada una borra SOLO su propia
-    // zona con ancho fijo generoso, sin tocar el resto de la tarjeta.
+    // Los 4 valores - ancho y alto de borrado generosos (antes 16px de alto
+    // exacto para texto de 16px, sin margen; ahora 20px de margen real).
     tft.setTextSize(2);
     String vStr = valid ? String(pzemData.voltage, 0) + "V" : "-- V";
-    displayPrintValue(cardX + 8, metricsY + 10, 60, vStr, COLOR_CYAN, COLOR_CARD);
+    displayPrintValue(col1X, row1Y + 10, 70, vStr, COLOR_CYAN, COLOR_CARD, 20);
 
     String aStr = valid ? String(pzemData.current, 1) + "A" : "-- A";
-    displayPrintValue(cardX + 8 + metricW, metricsY + 10, 60, aStr, COLOR_CYAN, COLOR_CARD);
+    displayPrintValue(col2X, row1Y + 10, 70, aStr, COLOR_CYAN, COLOR_CARD, 20);
 
     String wStr = valid ? String((int)watts) + "W" : "-- W";
-    displayPrintValue(cardX + 8 + metricW * 2, metricsY + 10, 70, wStr, COLOR_WHITE, COLOR_CARD);
+    displayPrintValue(col1X, row2Y + 10, 70, wStr, COLOR_WHITE, COLOR_CARD, 20);
 
-    // Metricas secundarias (Hz, PF, Energia)
-    tft.setTextSize(1);
-    String fStr = valid ? String(pzemData.frequency, 1) + " Hz" : "-- Hz";
-    displayPrintValue(cardX + 8, secY + 8, 60, fStr, COLOR_WHITE, COLOR_CARD);
-
-    String pfStr = valid ? String(pzemData.pf, 2) : "--";
-    displayPrintValue(cardX + 8 + secW, secY + 8, 60, pfStr, COLOR_WHITE, COLOR_CARD);
-
-    String eStr = valid ? String(pzemData.energy, 0) + " Wh" : "-- Wh";
-    displayPrintValue(cardX + 8 + secW * 2, secY + 8, 70, eStr, COLOR_WHITE, COLOR_CARD);
+    String fStr = valid ? String(pzemData.frequency, 1) + "Hz" : "-- Hz";
+    displayPrintValue(col2X, row2Y + 10, 70, fStr, COLOR_WHITE, COLOR_CARD, 20);
 }
 
 // Barra de estado inferior
@@ -2021,10 +2003,10 @@ String getJsonData() {
 // Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
 // define AQUI, despues de device_manager.h, porque necesita el arreglo
 // devices[] y el mutex que lo protege entre nucleos.
-#define DISPLAY_MAX_DEVICE_ROWS 7
+#define DISPLAY_MAX_DEVICE_ROWS 5
 void displayDrawDeviceList() {
     const int startX = 8;
-    const int startY = 110; // Debajo del panel de potencia (36 + 70 + 4)
+    const int startY = 136; // Debajo del panel de potencia (36 + 94 + 6)
     const int rowH = 16;
 
     struct RowData { String name; bool state; bool hasEnergy; bool metricsValid; float power; };
