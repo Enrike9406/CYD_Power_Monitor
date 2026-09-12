@@ -34,8 +34,6 @@
 #include <PZEM004Tv30.h>
 #include <SPIFFS.h>
 #include <Preferences.h>
-#include "device_manager.h"
-#include "device_pages.h"
 
 // ============================================
 // CONFIGURACION
@@ -96,6 +94,26 @@ TFT_eSPI tft;
 PZEM004Tv30 pzem(&Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 WebServer server(WEB_SERVER_PORT);
 WiFiManager wm;
+
+// ============================================
+// THEME ENGINE - ESTADO GLOBAL
+// Debe estar definido antes de cualquier funcion
+// que responda al boton BOOT.
+// ============================================
+Preferences themePreferences;
+
+enum UITheme : uint8_t {
+    THEME_SCADA = 0,
+    THEME_MINIMAL,
+    THEME_CYBERPUNK,
+    THEME_RETRO,
+    THEME_GLASS,
+    THEME_TESLA
+};
+
+static uint8_t currentTheme = THEME_TESLA;
+static uint8_t previousTheme = THEME_TESLA;
+
 
 PZEMData pzemData;
 ATSState atsState = ATS_UNKNOWN;
@@ -354,6 +372,19 @@ String formatRealTimestamp(unsigned long epoch) {
     strftime(buf, sizeof(buf), "%d/%m %H:%M", &ti);
     return String(buf);
 }
+
+/*
+ * Estos headers dependen de simbolos definidos arriba:
+ * LDR_PIN, FIRMWARE_VERSION, SCHEDULER_CHECK_INTERVAL,
+ * ATSState/atsState y atsGetStateString().
+ * device_pages.h tambien necesita checkRateLimit(), que
+ * se declara aqui antes de incluirlo.
+ */
+bool checkRateLimit();
+
+#include "device_manager.h"
+#include "device_pages.h"
+
 
 // Grafica de tendencia diaria (Red vs Generador) como SVG generado en el
 // servidor - sin librerias externas, coherente con el resto del proyecto.
@@ -871,6 +902,8 @@ void displayDrawFooter() {
     uiLastUptime = uptime;
     uiLastIp = ip;
 }
+
+void displayDrawDeviceList();
 
 void displayRenderCurrentTheme() {
     if (!displayInitialized) return;
@@ -2086,6 +2119,60 @@ String getJsonData() {
 // ============================================
 // THEME ENGINE - 6 INTERFACES
 // ============================================
+
+const char* uiThemeName(uint8_t theme) {
+    switch (theme) {
+        case THEME_SCADA:     return "Industrial SCADA";
+        case THEME_MINIMAL:   return "Minimalista";
+        case THEME_CYBERPUNK: return "Cyberpunk";
+        case THEME_RETRO:     return "Retro Terminal";
+        case THEME_GLASS:     return "Glassmorphism";
+        case THEME_TESLA:     return "Tesla / App moderna";
+        default:              return "Tesla / App moderna";
+    }
+}
+
+void uiLoadTheme() {
+    themePreferences.begin("ui", true);
+    uint8_t saved = themePreferences.getUChar("theme", THEME_TESLA);
+    themePreferences.end();
+
+    if (saved >= 6) saved = THEME_TESLA;
+
+    currentTheme = saved;
+    previousTheme = saved;
+}
+
+void uiSaveTheme() {
+    themePreferences.begin("ui", false);
+    themePreferences.putUChar("theme", currentTheme);
+    themePreferences.end();
+}
+
+void uiSetTheme(uint8_t theme) {
+    if (theme >= 6) return;
+
+    if (currentTheme == theme) {
+        uiResetDrawState();
+        if (displayInitialized) tft.fillScreen(UI_BG);
+        return;
+    }
+
+    currentTheme = theme;
+    uiSaveTheme();
+
+    // Fuerza una reconstruccion completa en el siguiente ciclo.
+    uiResetDrawState();
+    if (displayInitialized) tft.fillScreen(UI_BG);
+}
+
+void uiNextTheme() {
+    currentTheme = (currentTheme + 1) % 6;
+    uiSaveTheme();
+
+    uiResetDrawState();
+    if (displayInitialized) tft.fillScreen(UI_BG);
+}
 
 String themeSourceName() {
     if (!pzemData.isValid) return "SIN DATOS";
