@@ -680,6 +680,9 @@ const uint16_t UI_MUTED    = 0x5AEB;
 const uint16_t UI_LINE     = 0x39C7;
 
 static bool uiStaticDrawn = false;
+static bool themeStaticDrawn = false;
+static bool uiDeviceListTitleDrawn = false;
+static String uiDeviceListLastSignature = "\x01";
 static int uiLastAts = -1;
 static bool uiLastPzemValid = false;
 static String uiLastPower = "";
@@ -695,6 +698,9 @@ static String uiLastDeviceSignature = "";
 
 void uiResetDrawState() {
     uiStaticDrawn = false;
+    themeStaticDrawn = false;
+    uiDeviceListTitleDrawn = false;
+    uiDeviceListLastSignature = "\x01";
     uiLastAts = -1;
     uiLastPzemValid = false;
     uiLastPower = "";
@@ -770,122 +776,108 @@ void displayDrawHeader() {
 }
 
 void displayDrawSourceCard() {
-    // Panel principal: potencia + fuente ATS + V/A/PF.
-    const int x = 6, y = 39, w = 308, h = 69;
+    // Panel principal: solo POTENCIA (W), VOLTAJE (V) y CORRIENTE (A).
+    const int x = 6, y = 38, w = 308, h = 69;
 
-    // Fondo y marco se dibujan una sola vez para evitar parpadeo.
     if (!uiStaticDrawn) {
         tft.fillRoundRect(x, y, w, h, 8, UI_PANEL);
         tft.drawRoundRect(x, y, w, h, 8, UI_LINE);
     }
 
     bool valid = pzemData.isValid;
-    uint16_t sourceColor = UI_RED;
-    String source = "SIN DATOS";
-    if (valid && atsState == ATS_UTILITY_POWER) {
-        sourceColor = UI_GREEN;
-        source = "RED ELECTRICA";
-    } else if (valid && atsState == ATS_GENERATOR_POWER) {
-        sourceColor = UI_ORANGE;
-        source = "GENERADOR";
-    }
+    uint16_t sourceColor = themeSourceColor();
+    String source = themeSourceName();
 
-    // Fuente activa: solo se redibuja cuando cambia.
     static String lastSource = "";
-    if (source != lastSource || !uiStaticDrawn) {
+    if (source != lastSource) {
         tft.fillRoundRect(x + 10, y + 8, 116, 17, 8, sourceColor);
         tft.setTextSize(1);
         tft.setTextColor(UI_WHITE, sourceColor);
-        tft.setCursor(x + 18, y + 13);
+        tft.setCursor(x + 17, y + 13);
         tft.print(source);
         lastSource = source;
     }
 
-    // Potencia principal
     String power = valid ? String((int)round(pzemData.power)) : "--";
-    if (power != uiLastPower || !uiStaticDrawn) {
-        uiClearValue(x + 136, y + 5, 105, 32, UI_PANEL);
+    if (power != uiLastPower) {
+        uiClearValue(x + 136, y + 4, 105, 34, UI_PANEL);
         tft.setTextSize(3);
         tft.setTextColor(UI_WHITE, UI_PANEL);
-        tft.setCursor(x + 136, y + 5);
+        tft.setCursor(x + 136, y + 4);
         tft.print(power);
         tft.setTextSize(1);
-        tft.setTextColor(UI_MUTED, UI_PANEL);
-        tft.setCursor(x + 244, y + 17);
+        tft.setTextColor(UI_WHITE, UI_PANEL);
+        tft.setCursor(x + 244, y + 18);
         tft.print("W");
         uiLastPower = power;
     }
 
-    // V / A / PF en la parte inferior.
-    String v = valid ? String(pzemData.voltage, 1) + "V" : "-- V";
-    String a = valid ? String(pzemData.current, 2) + "A" : "-- A";
-    String pf = valid ? String(pzemData.pf, 2) : "--";
+    String v = valid ? String(pzemData.voltage, 1) + " V" : "-- V";
+    String a = valid ? String(pzemData.current, 2) + " A" : "-- A";
 
-    if (v != uiLastVoltage || !uiStaticDrawn) {
-        uiClearValue(x + 12, y + 42, 70, 18);
-        uiText(x + 12, y + 44, v, UI_BLUE, 1);
+    if (v != uiLastVoltage) {
+        uiClearValue(x + 12, y + 42, 105, 18, UI_PANEL);
+        uiText(x + 12, y + 44, v, 0x07FF, 1);
         uiLastVoltage = v;
     }
-    if (a != uiLastCurrent || !uiStaticDrawn) {
-        uiClearValue(x + 92, y + 42, 75, 18);
-        uiText(x + 92, y + 44, a, UI_BLUE, 1);
+    if (a != uiLastCurrent) {
+        uiClearValue(x + 120, y + 42, 105, 18, UI_PANEL);
+        uiText(x + 120, y + 44, a, 0xFFE0, 1);
         uiLastCurrent = a;
     }
-    if (pf != uiLastPF || !uiStaticDrawn) {
-        uiClearValue(x + 177, y + 42, 70, 18);
-        uiText(x + 177, y + 44, "PF " + pf, UI_MUTED, 1);
-        uiLastPF = pf;
-    }
-
-    // Temporizador ATS
-    String atsTime = formatDuration(atsGetTimeInState());
-    uiClearValue(x + 242, y + 42, 58, 18);
-    tft.setTextSize(1);
-    tft.setTextColor(UI_MUTED, UI_PANEL);
-    tft.setCursor(x + 242, y + 44);
-    tft.print(atsTime);
 }
 
 void displayDrawMetricCards() {
-    // Cuatro indicadores compactos, estilo app.
-    const int y = 114;
-    const int gap = 6;
-    const int w = 151;
-    const int h = 43;
+    // No mostramos PF, frecuencia ni energia en la pantalla principal.
+    // Esta zona queda como estado rapido del sistema.
+    const int y = 112;
+
+    static String lastPzemState = "";
+    static String lastWifiState = "";
+    static String lastSourceState = "";
+
+    String ps = pzemData.isValid ? "PZEM ONLINE" : "PZEM SIN DATOS";
+    String ws = WiFi.status() == WL_CONNECTED ? "WIFI OK" : "WIFI OFF";
+    String ss = themeSourceName();
 
     if (!uiStaticDrawn) {
-        tft.fillRoundRect(6, y, w, h, 7, UI_PANEL);
-        tft.fillRoundRect(163, y, w, h, 7, UI_PANEL);
-        tft.drawRoundRect(6, y, w, h, 7, UI_LINE);
-        tft.drawRoundRect(163, y, w, h, 7, UI_LINE);
+        tft.fillRoundRect(6, y, 308, 35, 7, UI_PANEL);
+        tft.drawRoundRect(6, y, 308, 35, 7, UI_LINE);
+    }
 
+    if (ps != lastPzemState) {
+        tft.fillRect(12, y + 4, 190, 14, UI_PANEL);
         tft.setTextSize(1);
-        tft.setTextColor(UI_MUTED, UI_PANEL);
+        tft.setTextColor(pzemData.isValid ? UI_GREEN : UI_RED, UI_PANEL);
         tft.setCursor(14, y + 7);
-        tft.print("FRECUENCIA");
-        tft.setCursor(171, y + 7);
-        tft.print("ENERGIA");
+        tft.print(ps);
+        lastPzemState = ps;
     }
 
-    String freq = pzemData.isValid ? String(pzemData.frequency, 1) + " Hz" : "-- Hz";
-    String energy = pzemData.isValid ? String(pzemData.energy / 1000.0, 2) + " kWh" : "-- kWh";
-
-    if (freq != uiLastFreq || !uiStaticDrawn) {
-        uiClearValue(14, y + 20, 130, 18);
-        uiText(14, y + 22, freq, UI_WHITE, 2);
-        uiLastFreq = freq;
+    if (ws != lastWifiState) {
+        tft.fillRect(207, y + 4, 96, 14, UI_PANEL);
+        tft.setTextSize(1);
+        tft.setTextColor(WiFi.status() == WL_CONNECTED ? UI_CYAN : UI_RED, UI_PANEL);
+        tft.setCursor(211, y + 7);
+        tft.print(ws);
+        lastWifiState = ws;
     }
-    if (energy != uiLastEnergy || !uiStaticDrawn) {
-        uiClearValue(171, y + 20, 130, 18);
-        uiText(171, y + 22, energy, UI_WHITE, 2);
-        uiLastEnergy = energy;
+
+    if (ss != lastSourceState) {
+        tft.fillRect(12, y + 19, 291, 13, UI_PANEL);
+        tft.setTextSize(1);
+        tft.setTextColor(themeSourceColor(), UI_PANEL);
+        tft.setCursor(14, y + 21);
+        tft.print("FUENTE: ");
+        tft.print(ss);
+        lastSourceState = ss;
     }
 }
 
 void displayDrawFooter() {
     // Uptime e IP en una franja discreta.
-    const int y = 164;
-    tft.fillRect(0, y, DISPLAY_WIDTH, 16, UI_BG);
+    const int y = 226;
+    tft.fillRect(0, y, DISPLAY_WIDTH, 14, UI_BG);
 
     String uptime = formatDurationLong(millis() / 1000);
     String ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "sin WiFi";
@@ -2246,358 +2238,212 @@ void themeFooter(uint16_t bg, uint16_t muted) {
     tft.print(currentTheme + 1);
 }
 
-void themeCoreMetrics(uint16_t bg, uint16_t panel, uint16_t text, uint16_t muted, uint16_t accent) {
-    // Bloque de potencia
-    tft.fillRoundRect(6, 38, 190, 78, 8, panel);
-    tft.drawRoundRect(6, 38, 190, 78, 8, accent);
-    tft.setTextSize(1);
-    tft.setTextColor(muted, panel);
-    tft.setCursor(15, 47);
-    tft.print("POTENCIA ACTIVA");
+void themeDrawBase(const char* title,
+                    uint16_t bg, uint16_t panel, uint16_t textColor,
+                    uint16_t muted, uint16_t accent) {
+    if (!themeStaticDrawn) {
+        tft.fillScreen(bg);
 
-    tft.setTextSize(3);
-    tft.setTextColor(text, panel);
-    tft.setCursor(14, 62);
-    tft.print(themePower());
+        tft.fillRect(0, 0, DISPLAY_WIDTH, 31, panel);
+        tft.drawFastHLine(0, 30, DISPLAY_WIDTH, accent);
+        tft.setTextSize(2);
+        tft.setTextColor(textColor, panel);
+        tft.setCursor(7, 6);
+        tft.print(title);
 
-    tft.setTextSize(1);
-    tft.setTextColor(themeSourceColor(), panel);
-    tft.setCursor(15, 101);
-    tft.print(themeSourceName());
+        tft.setTextSize(1);
+        tft.setTextColor(accent, panel);
+        tft.setCursor(250, 8);
+        tft.print("T");
+        tft.print(currentTheme + 1);
+        tft.print("/6");
 
-    // Estado ATS
-    tft.fillRoundRect(203, 38, 111, 78, 8, panel);
-    tft.drawRoundRect(203, 38, 111, 78, 8, themeSourceColor());
-    tft.setTextSize(1);
-    tft.setTextColor(muted, panel);
-    tft.setCursor(212, 47);
-    tft.print("ATS");
+        tft.fillRoundRect(6, 38, 308, 67, 8, panel);
+        tft.drawRoundRect(6, 38, 308, 67, 8, accent);
 
-    tft.setTextSize(1);
-    tft.setTextColor(themeSourceColor(), panel);
-    tft.setCursor(212, 62);
-    tft.print(themeSourceName());
-
-    tft.setTextColor(text, panel);
-    tft.setCursor(212, 79);
-    tft.print(formatDuration(atsGetTimeInState()));
-
-    tft.setTextColor(muted, panel);
-    tft.setCursor(212, 98);
-    tft.print("ESTADO ACTIVO");
-}
-
-void themeFourMetrics(uint16_t bg, uint16_t panel, uint16_t text, uint16_t muted, uint16_t accent) {
-    const int xs[4] = {6, 85, 164, 243};
-    const char* labels[4] = {"VOLTAJE", "CORRIENTE", "PF", "FRECUENCIA"};
-    String values[4] = {themeVoltage(), themeCurrent(), themePF(), themeFrequency()};
-
-    for (int i = 0; i < 4; i++) {
-        tft.fillRoundRect(xs[i], 123, 71, 47, 6, panel);
-        tft.drawRoundRect(xs[i], 123, 71, 47, 6, accent);
         tft.setTextSize(1);
         tft.setTextColor(muted, panel);
-        tft.setCursor(xs[i] + 6, 130);
-        tft.print(labels[i]);
-        tft.setTextColor(text, panel);
-        tft.setTextSize(1);
-        tft.setCursor(xs[i] + 6, 148);
-        tft.print(values[i]);
-    }
-}
+        tft.setCursor(15, 47);
+        tft.print("POTENCIA ACTIVA");
 
-void themeEnergyBar(uint16_t bg, uint16_t panel, uint16_t text, uint16_t muted, uint16_t accent) {
-    tft.fillRoundRect(6, 178, 308, 35, 7, panel);
-    tft.drawRoundRect(6, 178, 308, 35, 7, accent);
+        tft.fillRoundRect(6, 110, 98, 38, 6, panel);
+        tft.fillRoundRect(111, 110, 98, 38, 6, panel);
+        tft.fillRoundRect(216, 110, 98, 38, 6, panel);
+        tft.drawRoundRect(6, 110, 98, 38, 6, accent);
+        tft.drawRoundRect(111, 110, 98, 38, 6, accent);
+        tft.drawRoundRect(216, 110, 98, 38, 6, accent);
+
+        tft.setTextSize(1);
+        tft.setTextColor(muted, panel);
+        tft.setCursor(13, 117);  tft.print("VOLTAJE");
+        tft.setCursor(118, 117); tft.print("CORRIENTE");
+        tft.setCursor(223, 117); tft.print("FUENTE");
+
+        themeStaticDrawn = true;
+    }
+
+    tft.fillRect(14, 61, 190, 30, panel);
+    tft.setTextSize(3);
+    tft.setTextColor(textColor, panel);
+    tft.setCursor(14, 61);
+    tft.print(pzemData.isValid ? String((int)round(pzemData.power)) + " W" : "-- W");
+
+    String v = pzemData.isValid ? String(pzemData.voltage, 1) + " V" : "-- V";
+    String a = pzemData.isValid ? String(pzemData.current, 2) + " A" : "-- A";
+    String source = themeSourceName();
+
+    tft.fillRect(12, 127, 90, 15, panel);
+    tft.fillRect(117, 127, 90, 15, panel);
+    tft.fillRect(222, 127, 88, 15, panel);
+
     tft.setTextSize(1);
-    tft.setTextColor(muted, panel);
-    tft.setCursor(14, 185);
-    tft.print("ENERGIA ACUMULADA");
-    tft.setTextColor(text, panel);
-    tft.setCursor(14, 200);
-    tft.print(themeEnergy());
-    tft.setTextColor(muted, panel);
-    tft.setCursor(205, 200);
-    tft.print("ATS ");
-    tft.print(formatDuration(atsGetTimeInState()));
+    tft.setTextColor(0x07FF, panel);
+    tft.setCursor(13, 130);
+    tft.print(v);
+
+    tft.setTextColor(0xFFE0, panel);
+    tft.setCursor(118, 130);
+    tft.print(a);
+
+    tft.setTextColor(themeSourceColor(), panel);
+    tft.setCursor(223, 130);
+    tft.print(source);
+
+    tft.fillRect(218, 3, 27, 22, panel);
+    tft.setTextColor(WiFi.status() == WL_CONNECTED ? 0x07E0 : 0xF800, panel);
+    tft.setCursor(220, 7);
+    tft.print(WiFi.status() == WL_CONNECTED ? "NET" : "NO");
+
+    displayDrawDeviceList();
 }
 
 void themeDrawSCADA() {
-    const uint16_t bg = 0x0000, panel = 0x18C3, text = UI_WHITE, muted = 0x8410, accent = UI_GREEN;
-    tft.fillScreen(bg);
-    themeHeader("SCADA", bg, accent, text, muted);
-    themeCoreMetrics(bg, panel, text, muted, accent);
-    themeFourMetrics(bg, panel, text, muted, accent);
-    themeEnergyBar(bg, panel, text, muted, accent);
-    themeFooter(bg, muted);
+    themeDrawBase("SCADA POWER", 0x0000, 0x18C3, 0xFFFF, 0xBDF7, 0x07E0);
 }
 
 void themeDrawMinimal() {
-    const uint16_t bg = 0xFFFF, panel = 0xFFFF, text = 0x0000, muted = 0x5AEB, accent = 0x001F;
-    tft.fillScreen(bg);
-    tft.setTextSize(2);
-    tft.setTextColor(text, bg);
-    tft.setCursor(8, 7);
-    tft.print("CYD Power");
-    tft.setTextSize(1);
-    tft.setTextColor(muted, bg);
-    tft.setCursor(252, 10);
-    tft.print("T2");
-
-    tft.setTextSize(1);
-    tft.setTextColor(muted, bg);
-    tft.setCursor(10, 40);
-    tft.print("POTENCIA");
-    tft.setTextSize(4);
-    tft.setTextColor(text, bg);
-    tft.setCursor(8, 53);
-    tft.print(pzemData.isValid ? String((int)round(pzemData.power)) : "--");
-    tft.setTextSize(1);
-    tft.print(" W");
-
-    tft.drawFastHLine(8, 101, 304, 0xBDF7);
-    String vals[4] = {themeVoltage(), themeCurrent(), themeFrequency(), themeEnergy()};
-    const char* labels[4] = {"VOLT", "AMP", "HZ", "KWH"};
-    for (int i=0;i<4;i++) {
-        int x = 8 + (i%2)*156, y = 112 + (i/2)*38;
-        tft.setTextSize(1);
-        tft.setTextColor(muted, bg);
-        tft.setCursor(x,y);
-        tft.print(labels[i]);
-        tft.setTextColor(text, bg);
-        tft.setCursor(x+35,y);
-        tft.print(vals[i]);
-    }
-    tft.setTextColor(themeSourceColor(), bg);
-    tft.setCursor(8, 199);
-    tft.print(themeSourceName());
-    tft.setTextColor(muted, bg);
-    tft.setCursor(8, 222);
-    tft.print("Tema 2  |  ");
-    tft.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi");
+    themeDrawBase("CYD POWER", 0x0000, 0x0841, 0xFFFF, 0xBDF7, 0x07FF);
 }
 
 void themeDrawCyberpunk() {
-    const uint16_t bg = 0x1008, panel = 0x210A, text = UI_WHITE, muted = 0xA0B0, accent = 0xF81F;
-    tft.fillScreen(bg);
-    themeHeader("CYBER//POWER", bg, accent, text, muted);
-
-    tft.drawRect(4, 36, 312, 181, accent);
-    tft.drawFastHLine(4, 116, 316, 0x07FF);
-    tft.drawFastVLine(199, 36, 181, 0x07FF);
-
-    tft.setTextSize(1);
-    tft.setTextColor(0x07FF, bg);
-    tft.setCursor(12, 45); tft.print("> POWER");
-    tft.setTextSize(3);
-    tft.setTextColor(text, bg);
-    tft.setCursor(11, 60);
-    tft.print(themePower());
-
-    tft.setTextSize(1);
-    tft.setTextColor(themeSourceColor(), bg);
-    tft.setCursor(12, 101);
-    tft.print("["); tft.print(themeSourceName()); tft.print("]");
-
-    tft.setTextColor(0x07FF, bg);
-    tft.setCursor(210,45); tft.print("> SYSTEM");
-    tft.setTextColor(text, bg);
-    tft.setCursor(210,61); tft.print("V "); tft.print(themeVoltage());
-    tft.setCursor(210,77); tft.print("A "); tft.print(themeCurrent());
-    tft.setCursor(210,93); tft.print("PF "); tft.print(themePF());
-
-    tft.setTextColor(0x07FF, bg);
-    tft.setCursor(12, 128); tft.print("> TELEMETRY");
-    tft.setTextColor(text, bg);
-    tft.setCursor(12,145); tft.print("FREQ "); tft.print(themeFrequency());
-    tft.setCursor(12,161); tft.print("ENERGY "); tft.print(themeEnergy());
-    tft.setCursor(12,177); tft.print("ATS "); tft.print(formatDuration(atsGetTimeInState()));
-
-    tft.setTextColor(0x07FF, bg);
-    tft.setCursor(210,128); tft.print("> NET");
-    tft.setTextColor(text, bg);
-    tft.setCursor(210,145); tft.print(WiFi.status()==WL_CONNECTED ? "ONLINE" : "OFFLINE");
-    tft.setCursor(210,161); tft.print("THEME 03");
-    tft.setTextColor(muted, bg);
-    tft.setCursor(8, 224); tft.print("SYS://CYD_POWER_MONITOR");
+    themeDrawBase("CYBER//POWER", 0x1008, 0x210A, 0xFFFF, 0xBDF7, 0xF81F);
 }
 
 void themeDrawRetro() {
-    const uint16_t bg = 0x0000, panel = 0x0000, text = 0x07E0, muted = 0x03E0, accent = 0x07E0;
-    tft.fillScreen(bg);
-    tft.drawRect(3,3,314,234,accent);
-    tft.setTextSize(1);
-    tft.setTextColor(text,bg);
-    tft.setCursor(9,10);
-    tft.print("CYD_POWER_MONITOR.EXE  [T4]");
-    tft.drawFastHLine(7,22,306,accent);
-
-    tft.setCursor(9,32); tft.print("> STATUS: ");
-    tft.print(themeSourceName());
-    tft.setCursor(9,47); tft.print("> POWER : "); tft.print(themePower());
-    tft.setCursor(9,62); tft.print("> VOLT  : "); tft.print(themeVoltage());
-    tft.setCursor(9,77); tft.print("> AMP   : "); tft.print(themeCurrent());
-    tft.setCursor(9,92); tft.print("> PF    : "); tft.print(themePF());
-    tft.setCursor(9,107); tft.print("> FREQ  : "); tft.print(themeFrequency());
-    tft.setCursor(9,122); tft.print("> ENERGY: "); tft.print(themeEnergy());
-    tft.setCursor(9,137); tft.print("> ATS   : "); tft.print(formatDuration(atsGetTimeInState()));
-
-    tft.drawFastHLine(7,151,306,accent);
-    tft.setCursor(9,160); tft.print("> NETWORK");
-    tft.setCursor(9,175); tft.print("> WIFI  : ");
-    tft.print(WiFi.status()==WL_CONNECTED ? "CONNECTED" : "OFFLINE");
-    tft.setCursor(9,190); tft.print("> IP    : ");
-    tft.print(WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : "---");
-    tft.setCursor(9,205); tft.print("> READY.");
-    tft.setCursor(9,224); tft.print("> press BOOT = next theme");
+    themeDrawBase("POWER_TERMINAL", 0x0000, 0x0020, 0x07E0, 0x07E0, 0x07E0);
 }
 
 void themeDrawGlass() {
-    const uint16_t bg = 0x0821, panel = 0x2106, text = UI_WHITE, muted = 0xA534, accent = 0x5D7F;
-    tft.fillScreen(bg);
-
-    // Capas simuladas de glass en RGB565, ligeras para el ESP32.
-    tft.fillRoundRect(5,5,310,32,10,0x18A3);
-    tft.drawRoundRect(5,5,310,32,10,accent);
-    tft.setTextSize(2);
-    tft.setTextColor(text,0x18A3);
-    tft.setCursor(13,12); tft.print("CYD Power");
-    tft.setTextSize(1);
-    tft.setCursor(274,14); tft.print("T5");
-
-    tft.fillRoundRect(8,44,304,70,14,panel);
-    tft.drawRoundRect(8,44,304,70,14,accent);
-    tft.setTextSize(1);
-    tft.setTextColor(muted,panel); tft.setCursor(18,53); tft.print("LIVE POWER");
-    tft.setTextSize(3);
-    tft.setTextColor(text,panel); tft.setCursor(18,68); tft.print(themePower());
-    tft.setTextSize(1);
-    tft.setTextColor(themeSourceColor(),panel); tft.setCursor(204,76); tft.print(themeSourceName());
-
-    String labels[5] = {"VOLT","AMP","PF","HZ","KWH"};
-    String vals[5] = {themeVoltage(),themeCurrent(),themePF(),themeFrequency(),themeEnergy()};
-    for(int i=0;i<5;i++){
-        int x=7+i*62;
-        tft.fillRoundRect(x,123,57,67,10,0x18A3);
-        tft.drawRoundRect(x,123,57,67,10,accent);
-        tft.setTextSize(1); tft.setTextColor(muted,0x18A3); tft.setCursor(x+7,132); tft.print(labels[i]);
-        tft.setTextColor(text,0x18A3); tft.setCursor(x+7,151); tft.print(vals[i]);
-    }
-    tft.setTextColor(muted,bg);
-    tft.setCursor(8,205); tft.print("ATS ");
-    tft.setTextColor(themeSourceColor(),bg); tft.print(formatDuration(atsGetTimeInState()));
-    tft.setTextColor(muted,bg); tft.setCursor(220,205); tft.print("T5 GLASS");
-    tft.setCursor(8,224); tft.print(WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi");
+    themeDrawBase("GLASS POWER", 0x0821, 0x2106, 0xFFFF, 0xBDF7, 0x5DDF);
 }
-
 
 // Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
 // define AQUI, despues de device_manager.h, porque necesita el arreglo
 // devices[] y el mutex que lo protege entre nucleos.
 #define DISPLAY_MAX_DEVICE_ROWS 5
 void displayDrawDeviceList() {
+    // Solo muestra dispositivos que respondieron al ultimo sondeo.
     const int startX = 8;
-    const int startY = 136; // Debajo del panel de potencia (36 + 94 + 6)
-    const int rowH = 16;
+    const int startY = 164;
+    const int rowH = 15;
+    const int maxRows = 4;
 
-    struct RowData { String name; bool state; bool hasEnergy; bool metricsValid; float power; };
-    RowData rows[DISPLAY_MAX_DEVICE_ROWS];
+    struct RowData {
+        String name;
+        bool state;
+        bool hasEnergy;
+        bool metricsValid;
+        float power;
+        float voltage;
+        float current;
+    };
+
+    RowData rows[maxRows];
     int rowCount = 0;
 
     if (devicesMutex != NULL) {
         xSemaphoreTake(devicesMutex, portMAX_DELAY);
-        int n = min(deviceCount, DISPLAY_MAX_DEVICE_ROWS);
-        for (int i = 0; i < n; i++) {
-            rows[i].name = devices[i].name;
-            rows[i].state = devices[i].state;
-            rows[i].hasEnergy = devices[i].hasEnergyMonitoring;
-            rows[i].metricsValid = devices[i].metricsValid;
-            rows[i].power = devices[i].lastPower;
+
+        for (int i = 0; i < deviceCount && rowCount < maxRows; i++) {
+            if (devices[i].pollFailures != 0) continue;
+
+            rows[rowCount].name = devices[i].name;
+            rows[rowCount].state = devices[i].state;
+            rows[rowCount].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[rowCount].metricsValid = devices[i].metricsValid;
+            rows[rowCount].power = devices[i].lastPower;
+            rows[rowCount].voltage = devices[i].lastVoltage;
+            rows[rowCount].current = devices[i].lastCurrent;
+            rowCount++;
         }
-        rowCount = n;
+
         xSemaphoreGive(devicesMutex);
     }
 
-    // Firma que resume lo que se ve ahora mismo (nombre, encendido/apagado,
-    // consumo). Solo se redibuja la zona si algo realmente cambio - antes se
-    // borraba y volvia a pintar entera cada 1.5s sin necesidad, aportando
-    // al parpadeo general de la pantalla.
     String signature = String(rowCount);
     for (int i = 0; i < rowCount; i++) {
         signature += "|" + rows[i].name + ":" + String(rows[i].state) + ":" +
-                     ((rows[i].hasEnergy && rows[i].metricsValid) ? String((int)rows[i].power) : String("-"));
+                     ((rows[i].hasEnergy && rows[i].metricsValid)
+                        ? String((int)rows[i].power) + ":" +
+                          String(rows[i].voltage, 1) + ":" +
+                          String(rows[i].current, 2)
+                        : "-");
     }
 
-    static bool titleDrawn = false;
-    if (!titleDrawn) {
+    if (!uiDeviceListTitleDrawn) {
+        tft.fillRect(0, 148, DISPLAY_WIDTH, 15, UI_BG);
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_CYAN);
-        tft.setCursor(startX, startY - 14);
-        tft.print("DISPOSITIVOS");
-        tft.drawFastHLine(startX, startY - 4, 80, COLOR_BORDER);
-        titleDrawn = true;
+        tft.setTextColor(0xFFFF, UI_BG);
+        tft.setCursor(startX, 151);
+        tft.print("DISPOSITIVOS CONECTADOS");
+        tft.drawFastHLine(startX, 161, 170, 0x07FF);
+        uiDeviceListTitleDrawn = true;
     }
 
-    static String lastSignature = "\x01"; // imposible, fuerza el primer dibujo
-    if (signature == lastSignature) return;
-    lastSignature = signature;
+    if (signature == uiDeviceListLastSignature) return;
+    uiDeviceListLastSignature = signature;
 
-    // Limpiar zona de dispositivos
-    tft.fillRect(0, startY, DISPLAY_WIDTH, DISPLAY_MAX_DEVICE_ROWS * rowH + 4, COLOR_BG);
+    tft.fillRect(0, startY, DISPLAY_WIDTH, maxRows * rowH, UI_BG);
 
     if (rowCount == 0) {
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_MUTED);
-        tft.setCursor(startX, startY + 6);
-        tft.print("Sin dispositivos agregados");
+        tft.setTextColor(UI_MUTED, UI_BG);
+        tft.setCursor(startX, startY + 4);
+        tft.print("Esperando dispositivos conectados...");
         return;
     }
 
     for (int i = 0; i < rowCount; i++) {
         int y = startY + i * rowH;
-        
-        // Fila alternada para mejor legibilidad
-        if (i % 2 == 0) {
-            tft.fillRect(startX, y, DISPLAY_WIDTH - startX * 2, rowH - 1, COLOR_BG_ALT);
-        }
-        
-        // Linea separadora sutil
-        tft.drawFastHLine(startX, y + rowH - 1, DISPLAY_WIDTH - startX * 2, COLOR_BORDER);
+        uint16_t rowBg = (i % 2 == 0) ? 0x1082 : UI_BG;
 
-        // Indicador de estado (circulo con borde)
-        uint16_t dotColor = rows[i].state ? COLOR_GREEN : COLOR_DARK_GRAY;
-        tft.fillCircle(startX + 8, y + rowH / 2, 4, dotColor);
-        tft.drawCircle(startX + 8, y + rowH / 2, 4, COLOR_BORDER);
+        if (i % 2 == 0)
+            tft.fillRect(startX, y, DISPLAY_WIDTH - startX * 2, rowH - 1, rowBg);
 
-        // Nombre del dispositivo
+        tft.fillCircle(startX + 7, y + 7, 3, rows[i].state ? 0x07E0 : 0xFD20);
+
         tft.setTextSize(1);
-        tft.setTextColor(COLOR_WHITE);
-        tft.setCursor(startX + 18, y + 4);
+        tft.setTextColor(0xFFFF, rowBg);
+        tft.setCursor(startX + 16, y + 3);
+
         String nm = rows[i].name;
         if (nm.length() > 18) nm = nm.substring(0, 17) + ".";
         tft.print(nm);
 
-        // Valor (potencia o estado)
-        String valStr;
-        uint16_t valColor;
         if (rows[i].hasEnergy && rows[i].metricsValid) {
-            valStr = String((int)rows[i].power) + "W";
-            valColor = COLOR_CYAN;
+            tft.setTextColor(0xFFE0, rowBg);
+            tft.setCursor(188, y + 3);
+            tft.print(String((int)rows[i].power) + "W");
+
+            tft.setTextColor(0x07FF, rowBg);
+            tft.setCursor(239, y + 3);
+            tft.print(String(rows[i].voltage, 0) + "V ");
+            tft.print(String(rows[i].current, 1) + "A");
         } else {
-            valStr = rows[i].state ? "ON" : "OFF";
-            valColor = rows[i].state ? COLOR_GREEN : COLOR_MUTED;
+            tft.setTextColor(rows[i].state ? 0x07E0 : 0xFD20, rowBg);
+            tft.setCursor(272, y + 3);
+            tft.print(rows[i].state ? "ON" : "OFF");
         }
-        
-        // Fondo para el valor
-        int valW = valStr.length() * 8 + 6;
-        int valX = DISPLAY_WIDTH - startX - valW;
-        tft.fillRoundRect(valX - 2, y + 2, valW + 4, rowH - 4, 3, COLOR_CARD);
-        tft.drawRoundRect(valX - 2, y + 2, valW + 4, rowH - 4, 3, COLOR_BORDER);
-        
-        tft.setTextSize(1);
-        tft.setTextColor(valColor);
-        tft.setCursor(valX + 2, y + 4);
-        tft.print(valStr);
     }
 }
 
