@@ -857,7 +857,7 @@ void displayDrawMetricCards() {
     if (ws != lastWifiState) {
         tft.fillRect(207, y + 4, 96, 14, UI_PANEL);
         tft.setTextSize(1);
-        tft.setTextColor(WiFi.status() == WL_CONNECTED ? UI_CYAN : UI_RED, UI_PANEL);
+        tft.setTextColor(WiFi.status() == WL_CONNECTED ? 0x07FF : UI_RED, UI_PANEL);
         tft.setCursor(211, y + 7);
         tft.print(ws);
         lastWifiState = ws;
