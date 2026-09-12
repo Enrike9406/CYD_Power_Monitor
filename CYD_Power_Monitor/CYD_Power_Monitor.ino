@@ -34,6 +34,8 @@
 #include <PZEM004Tv30.h>
 #include <SPIFFS.h>
 #include <Preferences.h>
+#include "device_manager.h"
+#include "device_pages.h"
 
 // ============================================
 // CONFIGURACION
@@ -2401,8 +2403,6 @@ void themeDrawGlass() {
     tft.setCursor(8,224); tft.print(WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi");
 }
 
-#include "device_manager.h"
-#include "device_pages.h"
 
 // Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
 // define AQUI, despues de device_manager.h, porque necesita el arreglo
