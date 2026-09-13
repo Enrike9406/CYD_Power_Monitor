@@ -2329,9 +2329,82 @@ void themeDrawCyberpunk() {
     themeDrawBase("CYBER//POWER", 0x1008, 0x210A, 0xFFFF, 0xBDF7, 0xF81F);
 }
 
-void themeDrawRetro() {
-    themeDrawBase("POWER_TERMINAL", 0x0000, 0x0020, 0x07E0, 0x07E0, 0x07E0);
+
+String uiClockText() {
+    time_t now = time(nullptr);
+    if (now < 100000) return "--:--";
+    struct tm tmNow;
+    localtime_r(&now, &tmNow);
+    char buf[6];
+    snprintf(buf, sizeof(buf), "%02d:%02d", tmNow.tm_hour, tmNow.tm_min);
+    return String(buf);
 }
+
+void themeDrawRetro() {
+    const uint16_t bg = 0x0000;
+    const uint16_t text = 0x07E0;
+    const uint16_t accent = 0x07E0;
+    const uint16_t dim = 0x03E0;
+
+    // Static frame is drawn only once to avoid flicker.
+    if (!themeStaticDrawn) {
+        tft.fillScreen(bg);
+        tft.drawRect(2, 2, 316, 236, accent);
+        tft.setTextSize(1);
+        tft.setTextColor(text, bg);
+        tft.setCursor(8, 8);
+        tft.print("CYD_POWER_MONITOR.EXE");
+        tft.setCursor(245, 8);
+        tft.print("[T4]");
+        tft.drawFastHLine(6, 20, 308, accent);
+
+        // Fixed metric areas.
+        tft.setCursor(8, 31);  tft.print("> POWER");
+        tft.setCursor(8, 55);  tft.print("> VOLT");
+        tft.setCursor(8, 79);  tft.print("> AMP");
+        tft.setCursor(8, 103); tft.print("> SOURCE");
+
+        tft.drawFastHLine(6, 119, 308, accent);
+        tft.setCursor(8, 127); tft.print("> DEVICES CONNECTED");
+        tft.drawFastHLine(6, 141, 308, dim);
+
+        tft.setCursor(8, 224);
+        tft.print("> BOOT = NEXT THEME");
+        themeStaticDrawn = true;
+    }
+
+    // Dynamic values are erased only inside their own fixed regions.
+    tft.fillRect(95, 27, 215, 17, bg);
+    tft.fillRect(95, 51, 215, 17, bg);
+    tft.fillRect(95, 75, 215, 17, bg);
+    tft.fillRect(95, 99, 215, 17, bg);
+
+    tft.setTextSize(2);
+    tft.setTextColor(text, bg);
+
+    tft.setCursor(96, 27);
+    tft.print(themePower());
+
+    tft.setCursor(96, 51);
+    tft.print(themeVoltage());
+
+    tft.setCursor(96, 75);
+    tft.print(themeCurrent());
+
+    tft.setTextSize(1);
+    tft.setCursor(96, 103);
+    tft.print(themeSourceName());
+
+    // Time replaces the old  area.
+    tft.fillRect(244, 3, 69, 17, bg);
+    tft.setTextColor(text, bg);
+    tft.setTextSize(1);
+    tft.setCursor(249, 8);
+    tft.print(uiClockText());
+
+    displayDrawDeviceList();
+}
+
 
 void themeDrawGlass() {
     themeDrawBase("GLASS POWER", 0x0821, 0x2106, 0xFFFF, 0xBDF7, 0x5DDF);
