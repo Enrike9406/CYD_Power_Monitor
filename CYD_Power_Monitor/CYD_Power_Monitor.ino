@@ -58,7 +58,7 @@
 #define LDR_PIN 34
 #define BOOT_BUTTON_PIN 0
 #define DEBUG_BAUD_RATE 115200
-#define WEB_REFRESH_INTERVAL 5
+#define WEB_REFRESH_INTERVAL 1
 #define BOOT_RESET_HOLD_TIME 5000
 #define FIRMWARE_VERSION "3.0-6Themes"
 #define MAX_HISTORY_ENTRIES 300
@@ -857,7 +857,7 @@ void displayDrawMetricCards() {
     if (ws != lastWifiState) {
         tft.fillRect(207, y + 4, 96, 14, UI_PANEL);
         tft.setTextSize(1);
-        tft.setTextColor(WiFi.status() == WL_CONNECTED ? 0x07FF : UI_RED, UI_PANEL);
+        tft.setTextColor(WiFi.status() == WL_CONNECTED ? UI_CYAN : UI_RED, UI_PANEL);
         tft.setCursor(211, y + 7);
         tft.print(ws);
         lastWifiState = ws;
@@ -2329,85 +2329,203 @@ void themeDrawCyberpunk() {
     themeDrawBase("CYBER//POWER", 0x1008, 0x210A, 0xFFFF, 0xBDF7, 0xF81F);
 }
 
-
-String uiClockText() {
-    time_t now = time(nullptr);
-    if (now < 100000) return "--:--";
-    struct tm tmNow;
-    localtime_r(&now, &tmNow);
-    char buf[6];
-    snprintf(buf, sizeof(buf), "%02d:%02d", tmNow.tm_hour, tmNow.tm_min);
-    return String(buf);
-}
-
 void themeDrawRetro() {
+    // Retro Terminal: conserva la identidad original verde sobre negro,
+    // pero usa una distribución fija para evitar que los valores se
+    // dibujen encima de las etiquetas.
     const uint16_t bg = 0x0000;
-    const uint16_t text = 0x07E0;
-    const uint16_t accent = 0x07E0;
+    const uint16_t green = 0x07E0;
     const uint16_t dim = 0x03E0;
+    const uint16_t cyan = 0x07FF;
+    const uint16_t yellow = 0xFFE0;
 
-    // Static frame is drawn only once to avoid flicker.
     if (!themeStaticDrawn) {
         tft.fillScreen(bg);
-        tft.drawRect(2, 2, 316, 236, accent);
+        tft.drawRect(3, 3, 314, 234, green);
+
+        // HEADER
         tft.setTextSize(1);
-        tft.setTextColor(text, bg);
-        tft.setCursor(8, 8);
-        tft.print("CYD_POWER_MONITOR.EXE");
-        tft.setCursor(245, 8);
+        tft.setTextColor(green, bg);
+        tft.setCursor(9, 9);
+        tft.print("POWER_TERMINAL");
+        tft.setCursor(253, 9);
         tft.print("[T4]");
-        tft.drawFastHLine(6, 20, 308, accent);
+        tft.drawFastHLine(7, 22, 306, green);
 
-        // Fixed metric areas.
-        tft.setCursor(8, 31);  tft.print("> POWER");
-        tft.setCursor(8, 55);  tft.print("> VOLT");
-        tft.setCursor(8, 79);  tft.print("> AMP");
-        tft.setCursor(8, 103); tft.print("> SOURCE");
+        // POWER BLOCK
+        tft.setCursor(9, 30);
+        tft.print("> POTENCIA ACTIVA");
+        tft.drawFastHLine(7, 41, 306, dim);
 
-        tft.drawFastHLine(6, 119, 308, accent);
-        tft.setCursor(8, 127); tft.print("> DEVICES CONNECTED");
-        tft.drawFastHLine(6, 141, 308, dim);
+        // METRIC COLUMNS
+        tft.setCursor(9, 49);
+        tft.print("VOLTAJE");
+        tft.setCursor(112, 49);
+        tft.print("CORRIENTE");
+        tft.setCursor(222, 49);
+        tft.print("FUENTE");
+        tft.drawFastHLine(7, 84, 306, green);
 
-        tft.setCursor(8, 224);
-        tft.print("> BOOT = NEXT THEME");
+        // DEVICES
+        tft.setCursor(9, 89);
+        tft.print("DISPOSITIVOS CONECTADOS");
+        tft.drawFastHLine(7, 96, 306, dim);
+
+        // FOOTER
+        tft.drawFastHLine(7, 218, 306, green);
+        tft.setCursor(9, 224);
+        tft.print("CYD POWER");
+        tft.setCursor(222, 224);
+        tft.print("T4");
+
         themeStaticDrawn = true;
     }
 
-    // Dynamic values are erased only inside their own fixed regions.
-    tft.fillRect(95, 27, 215, 17, bg);
-    tft.fillRect(95, 51, 215, 17, bg);
-    tft.fillRect(95, 75, 215, 17, bg);
-    tft.fillRect(95, 99, 215, 17, bg);
-
-    tft.setTextSize(2);
-    tft.setTextColor(text, bg);
-
-    tft.setCursor(96, 27);
-    tft.print(themePower());
-
-    tft.setCursor(96, 51);
-    tft.print(themeVoltage());
-
-    tft.setCursor(96, 75);
-    tft.print(themeCurrent());
-
+    // Hora: siempre separada del título.
+    tft.fillRect(190, 5, 120, 14, bg);
     tft.setTextSize(1);
-    tft.setCursor(96, 103);
-    tft.print(themeSourceName());
-
-    // Time replaces the old  area.
-    tft.fillRect(244, 3, 69, 17, bg);
-    tft.setTextColor(text, bg);
-    tft.setTextSize(1);
-    tft.setCursor(249, 8);
+    tft.setTextColor(green, bg);
+    tft.setCursor(190, 9);
     tft.print(uiClockText());
 
-    displayDrawDeviceList();
-}
+    // Potencia: valor en su propia línea.
+    tft.fillRect(9, 43, 302, 18, bg);
+    tft.setTextSize(2);
+    tft.setTextColor(green, bg);
+    tft.setCursor(9, 43);
+    tft.print(themePower());
 
+    // Valores de las tres columnas: no comparten línea con las etiquetas.
+    tft.fillRect(9, 69, 94, 12, bg);
+    tft.fillRect(112, 69, 94, 12, bg);
+    tft.fillRect(222, 69, 88, 12, bg);
+    tft.setTextSize(1);
+
+    tft.setTextColor(cyan, bg);
+    tft.setCursor(9, 69);
+    tft.print(themeVoltage());
+
+    tft.setTextColor(yellow, bg);
+    tft.setCursor(112, 69);
+    tft.print(themeCurrent());
+
+    tft.setTextColor(themeSourceColor(), bg);
+    tft.setCursor(222, 69);
+    tft.print(themeSourceName());
+
+    displayDrawDeviceListRetro();
+
+    // IP en el footer, alineada a la derecha sin tocar el resto del diseño.
+    tft.fillRect(42, 221, 174, 13, bg);
+    tft.setTextColor(dim, bg);
+    tft.setCursor(42, 224);
+    if (WiFi.status() == WL_CONNECTED) {
+        tft.print(WiFi.localIP());
+    } else {
+        tft.print("sin WiFi");
+    }
+}
 
 void themeDrawGlass() {
     themeDrawBase("GLASS POWER", 0x0821, 0x2106, 0xFFFF, 0xBDF7, 0x5DDF);
+}
+
+// Renderer exclusivo del tema Retro Terminal. Mantiene el mismo estilo
+// visual del tema original y limita la información a cuatro filas para que
+// nunca invada el footer.
+void displayDrawDeviceListRetro() {
+    const int startX = 9;
+    const int startY = 100;
+    const int rowH = 28;
+    const int maxRows = 4;
+    const uint16_t bg = 0x0000;
+    const uint16_t green = 0x07E0;
+    const uint16_t dim = 0x03E0;
+    const uint16_t cyan = 0x07FF;
+    const uint16_t yellow = 0xFFE0;
+
+    struct RetroRow {
+        String name;
+        bool state;
+        bool hasEnergy;
+        bool metricsValid;
+        float power;
+        float voltage;
+        float current;
+    };
+
+    RetroRow rows[maxRows];
+    int rowCount = 0;
+
+    if (devicesMutex != NULL) {
+        xSemaphoreTake(devicesMutex, portMAX_DELAY);
+        for (int i = 0; i < deviceCount && rowCount < maxRows; i++) {
+            if (devices[i].pollFailures != 0) continue;
+
+            rows[rowCount].name = devices[i].name;
+            rows[rowCount].state = devices[i].state;
+            rows[rowCount].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[rowCount].metricsValid = devices[i].metricsValid;
+            rows[rowCount].power = devices[i].lastPower;
+            rows[rowCount].voltage = devices[i].lastVoltage;
+            rows[rowCount].current = devices[i].lastCurrent;
+            rowCount++;
+        }
+        xSemaphoreGive(devicesMutex);
+    }
+
+    // Limpia solamente la zona dinámica de dispositivos.
+    tft.fillRect(7, startY, 306, 116, bg);
+
+    if (rowCount == 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(dim, bg);
+        tft.setCursor(startX, 108);
+        tft.print("> esperando dispositivos...");
+        return;
+    }
+
+    for (int i = 0; i < rowCount; i++) {
+        const int y = startY + i * rowH;
+
+        // Línea de dispositivo: nombre arriba; valores abajo.
+        tft.fillRect(8, y, 304, 26, bg);
+        tft.setTextSize(1);
+        tft.setTextColor(rows[i].state ? green : 0xF800, bg);
+        tft.setCursor(startX, y + 2);
+        tft.print("> ");
+
+        String nm = rows[i].name;
+        if (nm.length() > 22) nm = nm.substring(0, 21) + ".";
+        tft.print(nm);
+
+        tft.setCursor(startX + 210, y + 2);
+        tft.print(rows[i].state ? "ON" : "OFF");
+
+        tft.setTextColor(rows[i].hasEnergy && rows[i].metricsValid ? yellow : dim, bg);
+        tft.setCursor(startX + 16, y + 14);
+
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            tft.print(String((int)round(rows[i].power)));
+            tft.print("W");
+
+            tft.setTextColor(cyan, bg);
+            tft.setCursor(startX + 100, y + 14);
+            tft.print(String(rows[i].voltage, 1));
+            tft.print("V");
+
+            tft.setTextColor(yellow, bg);
+            tft.setCursor(startX + 172, y + 14);
+            tft.print(String(rows[i].current, 2));
+            tft.print("A");
+        } else {
+            tft.print("ON/OFF");
+        }
+
+        if (i < rowCount - 1) {
+            tft.drawFastHLine(8, y + 26, 304, dim);
+        }
+    }
 }
 
 // Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
