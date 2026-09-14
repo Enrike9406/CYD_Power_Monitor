@@ -857,7 +857,7 @@ void displayDrawMetricCards() {
     if (ws != lastWifiState) {
         tft.fillRect(207, y + 4, 96, 14, UI_PANEL);
         tft.setTextSize(1);
-        tft.setTextColor(WiFi.status() == WL_CONNECTED ? UI_CYAN : UI_RED, UI_PANEL);
+        tft.setTextColor(WiFi.status() == WL_CONNECTED ? 0x07FF : UI_RED, UI_PANEL);
         tft.setCursor(211, y + 7);
         tft.print(ws);
         lastWifiState = ws;
@@ -2329,6 +2329,14 @@ void themeDrawCyberpunk() {
     themeDrawBase("CYBER//POWER", 0x1008, 0x210A, 0xFFFF, 0xBDF7, 0xF81F);
 }
 
+String uiClockText() {
+    struct tm ti;
+    if (!getLocalTime(&ti, 10)) return "--:--";
+    char buf[6];
+    strftime(buf, sizeof(buf), "%H:%M", &ti);
+    return String(buf);
+}
+
 void themeDrawRetro() {
     // Retro Terminal: conserva la identidad original verde sobre negro,
     // pero usa una distribución fija para evitar que los valores se
@@ -2358,11 +2366,11 @@ void themeDrawRetro() {
         tft.drawFastHLine(7, 41, 306, dim);
 
         // METRIC COLUMNS
-        tft.setCursor(9, 49);
+        tft.setCursor(9, 61);
         tft.print("VOLTAJE");
-        tft.setCursor(112, 49);
+        tft.setCursor(112, 61);
         tft.print("CORRIENTE");
-        tft.setCursor(222, 49);
+        tft.setCursor(222, 61);
         tft.print("FUENTE");
         tft.drawFastHLine(7, 84, 306, green);
 
