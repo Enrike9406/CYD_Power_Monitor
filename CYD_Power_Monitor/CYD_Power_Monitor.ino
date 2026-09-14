@@ -1,10 +1,10 @@
 /*
- * CYD-PZEM-ATS-Monitor v2.1
+ * CYD-PZEM-ATS-Monitor V4.0
  * 
  * Proyecto para CYD2USB (ESP32-2432S028) que monitorea un PZEM-004T 
  * y el estado de un ATS (Automatic Transfer Switch).
  * 
- * v2.1 - Professional industrial dashboard redesign
+ * V4.0 - Dashboard SPA ligero + WebSocket opcional + telemetria 1s + UX optimizada
  *   - Modern industrial web dashboard with real-time charts
  *   - Detailed ATS history with statistics and visual timeline
  *   - Professional dark theme with data visualization
@@ -35,6 +35,16 @@
 #include <SPIFFS.h>
 #include <Preferences.h>
 
+// WebSocket opcional: si la libreria ArduinoWebsockets/WebSocketsServer esta
+// instalada, el dashboard usa actualizacion push en tiempo real. Si no esta
+// instalada, V4 cae automaticamente a polling HTTP de 1 segundo.
+#if __has_include(<WebSocketsServer.h>)
+  #include <WebSocketsServer.h>
+  #define CYD_V4_HAS_WEBSOCKET 1
+#else
+  #define CYD_V4_HAS_WEBSOCKET 0
+#endif
+
 // ============================================
 // CONFIGURACION
 // ============================================
@@ -48,7 +58,7 @@
 #define PZEM_RX_PIN 27
 #define PZEM_TX_PIN 22
 #define PZEM_BAUD_RATE 9600
-#define PZEM_READ_INTERVAL 2000
+#define PZEM_READ_INTERVAL 1000
 #define ATS_STATUS_PIN 35
 #define ATS_DEBOUNCE_DELAY 500
 #define ATS_STABLE_COUNT 10
@@ -60,10 +70,10 @@
 #define DEBUG_BAUD_RATE 115200
 #define WEB_REFRESH_INTERVAL 1
 #define BOOT_RESET_HOLD_TIME 5000
-#define FIRMWARE_VERSION "3.0-6Themes"
+#define FIRMWARE_VERSION "4.0.0-V4"
 #define MAX_HISTORY_ENTRIES 300
 #define HISTORY_SAVE_INTERVAL 60000
-#define SCHEDULER_CHECK_INTERVAL 3000
+#define SCHEDULER_CHECK_INTERVAL 1500
 
 // ============================================
 // ENUMS Y ESTRUCTURAS
@@ -94,6 +104,12 @@ TFT_eSPI tft;
 PZEM004Tv30 pzem(&Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 WebServer server(WEB_SERVER_PORT);
 WiFiManager wm;
+
+#if CYD_V4_HAS_WEBSOCKET
+WebSocketsServer webSocket(81);
+unsigned long wsLastBroadcast = 0;
+#endif
+
 
 // ============================================
 // THEME ENGINE - ESTADO GLOBAL
@@ -146,7 +162,7 @@ unsigned long brightnessLastCheck = 0;
 
 // Rate limiting para API web
 #define RATE_LIMIT_WINDOW_MS 60000  // 1 minuto
-#define RATE_LIMIT_MAX_REQUESTS 120 // max 120 requests por minuto
+#define RATE_LIMIT_MAX_REQUESTS 240 // max 240 requests por minuto (compatible con polling de 1 s + margen)
 unsigned long rateLimitWindowStart = 0;
 int rateLimitRequestCount = 0;
 
@@ -250,6 +266,11 @@ void setLED(bool red, bool green, bool blue) {
 // ============================================
 // ATS
 // ============================================
+// V4: primera correccion de dispositivos se dispara en el mismo instante
+// en que el cambio ATS queda confirmado; el device manager sigue haciendo
+// las comprobaciones periodicas como respaldo.
+void enforceAtsAutomation();
+
 void atsBegin() {
     pinMode(ATS_STATUS_PIN, INPUT);
     int reading = digitalRead(ATS_STATUS_PIN);
@@ -286,6 +307,11 @@ void atsUpdate() {
             atsLastStateChange = now;
             Serial.print("ATS changed to: ");
             Serial.println(atsGetStateString(atsState));
+
+            // V4: accion inmediata. No esperamos al siguiente ciclo del
+            // administrador de dispositivos para iniciar el primer comando.
+            // El polling posterior confirma el estado real de cada dispositivo.
+            enforceAtsAutomation();
         }
     }
 }
@@ -1010,377 +1036,59 @@ void displayWiFiPortalInfo() {
 // ============================================
 String getMainPage() {
     String page;
-    page.reserve(20000);
-    
-    float apparentPower = 0;
-    float reactivePower = 0;
-    if (pzemData.isValid && pzemData.voltage > 0 && pzemData.pf > 0) {
-        apparentPower = pzemData.power / pzemData.pf;
-        reactivePower = sqrt(apparentPower * apparentPower - pzemData.power * pzemData.power);
-    }
-    
-    float utilPct = atsGetPercentageInState(ATS_UTILITY_POWER);
-    float genPct = atsGetPercentageInState(ATS_GENERATOR_POWER);
-    
+    page.reserve(24000);
+
     page = F(R"rawliteral(<!DOCTYPE html>
 <html lang='es'>
 <head>
 <meta charset='utf-8'>
-<meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>CYD Power Monitor v)rawliteral");
-    page += FIRMWARE_VERSION;
-    page += F(R"rawliteral(</title>
+<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>
+<meta name='theme-color' content='#07111f'>
+<title>CYD Power Monitor V4</title>
 <style>
-:root{--bg:#0a0e17;--card:#111827;--border:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--accent:#00d4ff;--accent2:#3b82f6;--green:#10b981;--orange:#f59e0b;--red:#ef4444;--purple:#8b5cf6}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
-.topbar{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);padding:0;border-bottom:2px solid var(--accent);position:sticky;top:0;z-index:100}
-.topbar-inner{max-width:1400px;margin:0 auto;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
-.logo{display:flex;align-items:center;gap:12px}
-.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.2em;font-weight:bold;color:#000}
-.logo-text h1{color:var(--accent);font-size:1.3em;letter-spacing:-0.5px}
-.logo-text span{color:var(--muted);font-size:0.75em}
-.nav{display:flex;gap:6px;flex-wrap:wrap}
-.nav a{color:var(--muted);text-decoration:none;padding:8px 16px;border-radius:6px;font-size:0.85em;font-weight:500;transition:all 0.2s;border:1px solid transparent}
-.nav a:hover,.nav a.active{color:var(--accent);background:rgba(0,212,255,0.1);border-color:rgba(0,212,255,0.2)}
-.container{max-width:1400px;margin:0 auto;padding:20px}
-.grid{display:grid;gap:16px}
-.grid-4{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
-.grid-2{grid-template-columns:repeat(auto-fit,minmax(400px,1fr))}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
-.card-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
-.card-header h2{font-size:0.95em;color:var(--accent);display:flex;align-items:center;gap:8px;font-weight:600}
-.card-header h2::before{content:'';width:3px;height:16px;background:var(--accent);border-radius:2px}
-.card-body{padding:18px}
-.status-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:0.75em;font-weight:600}
-.status-badge::before{content:'';width:6px;height:6px;border-radius:50%;animation:pulse 2s infinite}
-.status-online{background:rgba(16,185,129,0.15);color:var(--green)}
-.status-online::before{background:var(--green)}
-.status-offline{background:rgba(239,68,68,0.15);color:var(--red)}
-.status-offline::before{background:var(--red);animation:none}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
-.metric{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border:1px solid var(--border);border-radius:10px;padding:16px;text-align:center;transition:transform 0.2s}
-.metric:hover{transform:translateY(-2px);border-color:var(--accent)}
-.metric .icon{font-size:1.5em;margin-bottom:6px}
-.metric .label{color:var(--muted);font-size:0.65em;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px}
-.metric .value{font-size:1.6em;font-weight:700;color:var(--text);line-height:1.2}
-.metric .value.accent{color:var(--accent)}
-.metric .value.green{color:var(--green)}
-.metric .value.orange{color:var(--orange)}
-.metric .value.purple{color:var(--purple)}
-.metric .unit{font-size:0.5em;color:var(--muted);margin-left:2px}
-.metric .sub{color:var(--muted);font-size:0.7em;margin-top:4px}
-.ats-panel{text-align:center;padding:24px}
-.ats-state{display:inline-flex;align-items:center;gap:12px;padding:14px 32px;border-radius:50px;font-size:1.3em;font-weight:700;margin-bottom:16px;border:2px solid}
-.ats-state.utility{background:rgba(16,185,129,0.1);color:var(--green);border-color:var(--green);box-shadow:0 0 20px rgba(16,185,129,0.2)}
-.ats-state.generator{background:rgba(245,158,11,0.1);color:var(--orange);border-color:var(--orange);box-shadow:0 0 20px rgba(245,158,11,0.2)}
-.ats-state.unknown{background:rgba(239,68,68,0.1);color:var(--red);border-color:var(--red)}
-.ats-state::before{content:'';width:12px;height:12px;border-radius:50%;background:currentColor;animation:blink 1.5s infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
-.ats-timer{font-size:1.1em;color:var(--muted);margin-bottom:20px;font-variant-numeric:tabular-nums}
-.ats-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:500px;margin:0 auto}
-.ats-stat{background:#0f172a;border-radius:8px;padding:12px}
-.ats-stat .lbl{color:var(--muted);font-size:0.7em;text-transform:uppercase;margin-bottom:4px}
-.ats-stat .val{font-size:1.3em;font-weight:700}
-.ats-stat .val.green{color:var(--green)}
-.ats-stat .val.orange{color:var(--orange)}
-.progress-bar{height:28px;background:#0f172a;border-radius:8px;overflow:hidden;display:flex;margin-top:8px;border:1px solid var(--border)}
-.progress-bar .fill{height:100%;display:flex;align-items:center;justify-content:center;font-size:0.75em;font-weight:700;transition:width 0.5s ease}
-.progress-bar .utility{background:linear-gradient(90deg,var(--green),#059669);color:#fff}
-.progress-bar .generator{background:linear-gradient(90deg,var(--orange),#d97706);color:#fff}
-.system-info{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-.info-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#0f172a;border-radius:6px;font-size:0.85em}
-.info-item .lbl{color:var(--muted)}
-.info-item .val{color:var(--accent);font-weight:600;font-variant-numeric:tabular-nums}
-.footer{text-align:center;padding:24px;color:var(--muted);font-size:0.8em;border-top:1px solid var(--border);margin-top:20px}
-@media(max-width:768px){.grid-2{grid-template-columns:1fr}.ats-stats{grid-template-columns:1fr}}
-</style>
-</head>
+:root{--bg:#06101c;--panel:#0b1727;--panel2:#0e1d30;--line:#1b3048;--text:#eaf2fb;--muted:#8193a8;--cyan:#22d3ee;--green:#22c55e;--orange:#f59e0b;--red:#ef4444;--blue:#60a5fa;--purple:#a78bfa;--shadow:0 12px 34px rgba(0,0,0,.24)}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 15% 0,#0d2036 0,#06101c 35%,#040b13 100%);color:var(--text);font-family:Inter,Segoe UI,system-ui,-apple-system,sans-serif;line-height:1.45}
+.top{position:sticky;top:0;z-index:20;background:rgba(5,13,23,.88);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.topin{max-width:1450px;margin:auto;padding:12px 18px;display:flex;align-items:center;gap:18px;justify-content:space-between}.brand{display:flex;align-items:center;gap:11px;min-width:0}.logo{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(135deg,#22d3ee,#3b82f6);color:#02111c;font-weight:900;box-shadow:0 0 28px rgba(34,211,238,.2)}.brand h1{font-size:1.02rem;margin:0;white-space:nowrap}.brand small{display:block;color:var(--muted);font-size:.68rem;margin-top:2px}.nav{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.nav a{color:var(--muted);text-decoration:none;border:1px solid transparent;border-radius:9px;padding:8px 11px;font-size:.78rem}.nav a:hover{color:var(--text);border-color:var(--line);background:#0c1b2c}.nav .active{color:var(--cyan);border-color:rgba(34,211,238,.24);background:rgba(34,211,238,.08)}
+.wrap{max-width:1450px;margin:auto;padding:18px}.hero{display:grid;grid-template-columns:1.6fr .7fr;gap:14px;margin-bottom:14px}.heroCard,.card{background:linear-gradient(145deg,rgba(14,29,48,.96),rgba(7,17,29,.96));border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}.heroCard{padding:22px}.eyebrow{color:var(--cyan);font-size:.68rem;letter-spacing:1.8px;text-transform:uppercase;font-weight:800}.power{font-size:clamp(2.5rem,6vw,4.8rem);font-weight:800;letter-spacing:-3px;margin:3px 0}.power span{font-size:.34em;color:var(--muted);letter-spacing:0}.source{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;font-size:.75rem;font-weight:700;background:#10233a}.dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.source.utility{color:var(--green)}.source.generator{color:var(--orange)}.source.unknown{color:var(--red)}
+.sync{padding:18px;display:flex;flex-direction:column;justify-content:center;gap:10px}.syncLine{display:flex;justify-content:space-between;gap:10px;font-size:.75rem}.muted{color:var(--muted)}.live{color:var(--green);font-weight:800}.live.ws{color:var(--cyan)}
+.grid{display:grid;gap:14px}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.card{padding:16px}.title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px}.title h2{font-size:.9rem;margin:0}.title .tag{font-size:.65rem;color:var(--muted);border:1px solid var(--line);padding:4px 7px;border-radius:7px}.metric{padding:14px;border:1px solid var(--line);border-radius:12px;background:rgba(5,14,25,.55);min-width:0}.metric .k{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px}.metric .v{font-size:1.45rem;font-weight:750;margin-top:4px}.metric .u{font-size:.65em;color:var(--muted);font-weight:500}.cyan{color:var(--cyan)}.green{color:var(--green)}.orange{color:var(--orange)}.purple{color:var(--purple)}.red{color:var(--red)}
+.ats{display:flex;align-items:center;justify-content:space-between;gap:18px}.atsState{font-size:1.25rem;font-weight:800}.atsState.utility{color:var(--green)}.atsState.generator{color:var(--orange)}.atsState.unknown{color:var(--red)}.bar{height:12px;border-radius:999px;background:#06101c;border:1px solid var(--line);overflow:hidden;display:flex}.bar i{display:block;height:100%;transition:width .35s ease}.bar .u{background:var(--green)}.bar .g{background:var(--orange)}
+.devices{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.device{border:1px solid var(--line);border-radius:12px;padding:12px;background:rgba(4,12,21,.62)}.deviceHead{display:flex;justify-content:space-between;gap:8px;align-items:center}.deviceName{font-weight:700;font-size:.84rem}.state{font-size:.63rem;font-weight:800;padding:4px 7px;border-radius:7px}.state.on{color:var(--green);background:rgba(34,197,94,.1)}.state.off{color:var(--red);background:rgba(239,68,68,.1)}.dmetrics{display:flex;gap:14px;margin-top:10px;color:var(--muted);font-size:.68rem}.dmetrics b{color:var(--text);font-weight:700}.empty{color:var(--muted);font-size:.78rem;padding:10px 0}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;color:var(--text);background:#102239;border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:.75rem}.btn:hover{border-color:#2e587d}.btn.primary{background:rgba(34,211,238,.1);border-color:rgba(34,211,238,.3);color:var(--cyan)}
+.footer{text-align:center;color:var(--muted);font-size:.68rem;padding:24px 0 8px}.pulse{animation:p 1.5s infinite}@keyframes p{50%{opacity:.45}}
+@media(max-width:1000px){.g4{grid-template-columns:repeat(2,1fr)}.hero{grid-template-columns:1fr}.nav{justify-content:flex-start}}@media(max-width:620px){.topin{align-items:flex-start;flex-direction:column}.nav{width:100%;overflow:auto;flex-wrap:nowrap}.nav a{white-space:nowrap}.wrap{padding:10px}.g4,.g2,.g3{grid-template-columns:1fr}.heroCard{padding:16px}.power{font-size:3.3rem}.ats{align-items:flex-start;flex-direction:column}}
+</style></head>
 <body>
-<div class='topbar'>
-<div class='topbar-inner'>
-<div class='logo'>
-<div class='logo-icon'>⚡</div>
-<div class='logo-text'>
-<h1>CYD Power Monitor</h1>
-<span>Sistema de Monitoreo Energético Industrial</span>
-</div>
-</div>
-<div class='nav'>
-<a href='/' class='active'>Dashboard</a>
-<a href='/history'>Histórico ATS</a>
-<a href='/devices'>Dispositivos</a>
-<a href='/ota'>Actualización</a>
-</div>
-</div>
-</div>
-<div class='container'>
-<div class='grid grid-4'>
-<div class='card'>
-<div class='card-header'>
-<h2>🌐 Conectividad</h2>
-<span class='status-badge status-online'>EN LÍNEA</span>
-</div>
-<div class='card-body'>
-<div class='metric-grid'>
-<div class='metric'>
-<div class='icon'>📶</div>
-<div class='label'>Señal WiFi</div>
-<div class='value accent' id='v_rssi'>)rawliteral");
-    page += WiFi.RSSI();
-    page += F(R"rawliteral(</div><div style='color:var(--muted);font-size:0.65em'>dBm</div>
-</div>
-<div class='metric'>
-<div class='icon'>🕐</div>
-<div class='label'>Tiempo Activo</div>
-<div class='value' id='v_uptime'>)rawliteral");
-    page += formatDurationLong(millis() / 1000);
-    page += F(R"rawliteral(</div>
-</div>
-</div>
-<div class='system-info' style='margin-top:12px'>
-<div class='info-item'><span class='lbl'>IP Local</span><span class='val'>)rawliteral");
-    page += WiFi.localIP().toString();
-    page += F(R"rawliteral(</span></div>
-<div class='info-item'><span class='lbl'>Hostname</span><span class='val'>)rawliteral");
-    page += WiFi.getHostname();
-    page += F(R"rawliteral(</span></div>
-<div class='info-item'><span class='lbl'>MAC</span><span class='val'>)rawliteral");
-    page += WiFi.macAddress();
-    page += F(R"rawliteral(</span></div>
-</div>
-</div>
-</div>
-<div class='card'>
-<div class='card-header'>
-<h2>⚡ PZEM-004T</h2>
-<span class='status-badge ')rawliteral");
-    page += pzemData.isValid ? F("status-online'>CONECTADO") : F("status-offline'>SIN DATOS");
-    page += F(R"rawliteral(</span>
-</div>
-<div class='card-body'>
-<div class='metric-grid'>
-<div class='metric'>
-<div class='icon'>🔌</div>
-<div class='label'>Voltaje</div>
-<div class='value accent'><span id='v_volt'>)rawliteral");
-    page += String(pzemData.voltage, 1);
-    page += F(R"rawliteral(</span><span class='unit'>V</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>⚡</div>
-<div class='label'>Corriente</div>
-<div class='value accent'><span id='v_curr'>)rawliteral");
-    page += String(pzemData.current, 2);
-    page += F(R"rawliteral(</span><span class='unit'>A</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>💡</div>
-<div class='label'>Potencia Activa</div>
-<div class='value green'><span id='v_pow'>)rawliteral");
-    page += String(pzemData.power, 1);
-    page += F(R"rawliteral(</span><span class='unit'>W</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>📊</div>
-<div class='label'>Potencia Aparente</div>
-<div class='value purple'><span id='v_app'>)rawliteral");
-    page += String(apparentPower, 1);
-    page += F(R"rawliteral(</span><span class='unit'>VA</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>🔄</div>
-<div class='label'>Potencia Reactiva</div>
-<div class='value orange'><span id='v_react'>)rawliteral");
-    page += String(reactivePower, 1);
-    page += F(R"rawliteral(</span><span class='unit'>VAR</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>📈</div>
-<div class='label'>Factor de Potencia</div>
-<div class='value'><span id='v_pf'>)rawliteral");
-    page += String(pzemData.pf, 2);
-    page += F(R"rawliteral(</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>🌊</div>
-<div class='label'>Frecuencia</div>
-<div class='value accent'><span id='v_freq'>)rawliteral");
-    page += String(pzemData.frequency, 1);
-    page += F(R"rawliteral(</span><span class='unit'>Hz</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>🔋</div>
-<div class='label'>Energía Total</div>
-<div class='value green'><span id='v_energy'>)rawliteral");
-    page += String(pzemData.energy, 1);
-    page += F(R"rawliteral(</span><span class='unit'>Wh</span></div>
-<div class='sub'><span id='v_kwh'>)rawliteral");
-    page += String(pzemData.energy / 1000.0, 3);
-    page += F(R"rawliteral(</span> kWh</div>
-</div>
-</div>
-</div>
-</div>
-<div class='card'>
-<div class='card-header'>
-<h2>🔄 ATS Transfer Switch</h2>
-<span id='ats_badge' class='status-badge ')rawliteral");
-    if (atsState == ATS_UTILITY_POWER) page += F("status-online'>RED ELÉCTRICA");
-    else if (atsState == ATS_GENERATOR_POWER) page += F("status-badge' style='background:rgba(245,158,11,0.15);color:var(--orange)'>GENERADOR");
-    else page += F("status-offline'>DESCONOCIDO");
-    page += F(R"rawliteral(</span>
-</div>
-<div class='card-body'>
-<div class='ats-panel'>
-<div id='ats_state' class='ats-state )rawliteral");
-    if (atsState == ATS_UTILITY_POWER) page += F("utility'>RED ELÉCTRICA");
-    else if (atsState == ATS_GENERATOR_POWER) page += F("generator'>GENERADOR");
-    else page += F("unknown'>DESCONOCIDO");
-    page += F(R"rawliteral(</div>
-<div class='ats-timer'>⏱️ Tiempo en estado actual: <strong id='v_atstime'>)rawliteral");
-    page += formatDurationLong(atsGetTimeInState());
-    page += F(R"rawliteral(</strong></div>
-<div class='ats-stats'>
-<div class='ats-stat'>
-<div class='lbl'>Tiempo Red</div>
-<div class='val green' id='v_uttime'>)rawliteral");
-    page += formatDurationLong(atsGetTotalTimeInState(ATS_UTILITY_POWER));
-    page += F(R"rawliteral(</div>
-</div>
-<div class='ats-stat'>
-<div class='lbl'>Tiempo Generador</div>
-<div class='val orange'>)rawliteral");
-    page += formatDurationLong(atsGetTotalTimeInState(ATS_GENERATOR_POWER));
-    page += F(R"rawliteral(</div>
-</div>
-<div class='ats-stat'>
-<div class='lbl'>Cambios Totales</div>
-<div class='val accent'>)rawliteral");
-    page += historyCount;
-    page += F(R"rawliteral(</div>
-</div>
-</div>
-<div style='margin-top:16px'>
-<div style='display:flex;justify-content:space-between;font-size:0.8em;margin-bottom:4px'>
-<span style='color:var(--green)'>Red: <span id='v_upct'>)rawliteral");
-    page += String(utilPct, 1);
-    page += F(R"rawliteral(%</span></span>
-<span style='color:var(--orange)'>Generador: <span id='v_gpct'>)rawliteral");
-    page += String(genPct, 1);
-    page += F(R"rawliteral(%</span></span>
-</div>
-<div class='progress-bar'>
-<div class='fill utility' id='bar_util' style='width:)rawliteral");
-    page += String(utilPct, 1);
-    page += F(R"rawliteral(%'>Red</div>
-<div class='fill generator' id='bar_gen' style='width:)rawliteral");
-    page += String(genPct, 1);
-    page += F(R"rawliteral(%'>Gen</div>
-</div>
-</div>
-</div>
-</div>
-</div>
-<div class='card'>
-<div class='card-header'>
-<h2>📊 Estadísticas del Sistema</h2>
-</div>
-<div class='card-body'>
-<div class='metric-grid'>
-<div class='metric'>
-<div class='icon'>📋</div>
-<div class='label'>Registros ATS</div>
-<div class='value accent'>)rawliteral");
-    page += historyCount;
-    page += F(R"rawliteral(<span class='unit'>/100</span></div>
-</div>
-<div class='metric'>
-<div class='icon'>🔁</div>
-<div class='label'>Cambios a Red</div>
-<div class='value green'>)rawliteral");
-    page += atsGetStateChangesCount(ATS_UTILITY_POWER);
-    page += F(R"rawliteral(</div>
-</div>
-<div class='metric'>
-<div class='icon'>🔁</div>
-<div class='label'>Cambios a Gen</div>
-<div class='value orange'>)rawliteral");
-    page += atsGetStateChangesCount(ATS_GENERATOR_POWER);
-    page += F(R"rawliteral(</div>
-</div>
-<div class='metric'>
-<div class='icon'>⏱️</div>
-<div class='label'>Duración Prom. Red</div>
-<div class='value green'>)rawliteral");
-    page += formatDurationLong(atsGetAverageDuration(ATS_UTILITY_POWER));
-    page += F(R"rawliteral(</div>
-</div>
-<div class='metric'>
-<div class='icon'>⏱️</div>
-<div class='label'>Duración Prom. Gen</div>
-<div class='value orange'>)rawliteral");
-    page += formatDurationLong(atsGetAverageDuration(ATS_GENERATOR_POWER));
-    page += F(R"rawliteral(</div>
-</div>
-<div class='metric'>
-<div class='icon'>🔋</div>
-<div class='label'>Eficiencia</div>
-<div class='value purple'>)rawliteral");
-    page += pzemData.pf > 0 ? String(pzemData.pf * 100, 0) : F("0");
-    page += F(R"rawliteral(<span class='unit'>%</span></div>
-</div>
-</div>
-</div>
-</div>
-</div>
-<div class='footer'>
-<p>CYD Power Monitor v)rawliteral");
-    page += FIRMWARE_VERSION;
-    page += F(R"rawliteral( | ESP32-2432S028 | Sistema de Monitoreo Energético Industrial</p>
-<p style='margin-top:4px;font-size:0.85em' id='lastUpdate'>Conectando...</p>
-</div>
-</div>
+<div class='top'><div class='topin'><div class='brand'><div class='logo'>⚡</div><div><h1>CYD Power Monitor</h1><small>V4 · Live Energy Control</small></div></div><div class='nav'><a class='active' href='/'>Dashboard</a><a href='/history'>Histórico ATS</a><a href='/devices'>Dispositivos</a><a href='/theme'>Temas</a><a href='/ota'>OTA</a></div></div></div>
+<main class='wrap'>
+<section class='hero'><div class='heroCard'><div class='eyebrow'>Potencia activa · PZEM-004T</div><div class='power'><span id='power'>--</span> <span>W</span></div><div id='source' class='source unknown'><i class='dot'></i><span id='sourceText'>DESCONOCIDO</span></div></div><div class='heroCard sync'><div class='syncLine'><span class='muted'>Conexión</span><strong id='conn'>ONLINE</strong></div><div class='syncLine'><span class='muted'>Canal de datos</span><strong id='channel' class='live'>HTTP LIVE</strong></div><div class='syncLine'><span class='muted'>Latencia UI</span><strong id='latency'>-- ms</strong></div><div class='syncLine'><span class='muted'>IP</span><strong id='ip'>--</strong></div></div></section>
+<section class='grid g4' style='margin-bottom:14px'><div class='metric'><div class='k'>Voltaje</div><div class='v cyan'><span id='volt'>--</span><span class='u'> V</span></div></div><div class='metric'><div class='k'>Corriente</div><div class='v cyan'><span id='curr'>--</span><span class='u'> A</span></div></div><div class='metric'><div class='k'>Factor de potencia</div><div class='v'><span id='pf'>--</span></div></div><div class='metric'><div class='k'>Frecuencia</div><div class='v cyan'><span id='freq'>--</span><span class='u'> Hz</span></div></div></section>
+<section class='grid g2' style='margin-bottom:14px'><div class='card'><div class='title'><h2>⚡ Energía instantánea</h2><span class='tag'>PZEM</span></div><div class='grid g3'><div class='metric'><div class='k'>Aparente</div><div class='v'><span id='app'>--</span><span class='u'> VA</span></div></div><div class='metric'><div class='k'>Reactiva</div><div class='v orange'><span id='react'>--</span><span class='u'> VAR</span></div></div><div class='metric'><div class='k'>Acumulada</div><div class='v green'><span id='energy'>--</span><span class='u'> Wh</span></div></div></div></div>
+<div class='card'><div class='title'><h2>🔄 ATS</h2><span class='tag' id='changes'>0 cambios</span></div><div class='ats'><div><div id='atsState' class='atsState unknown'>DESCONOCIDO</div><div class='muted' style='font-size:.72rem;margin-top:4px'>Tiempo en estado: <b id='atsTime'>--</b></div></div><div style='min-width:190px;width:42%'><div class='syncLine'><span class='muted'>Red</span><b class='green' id='upct'>0%</b></div><div class='syncLine'><span class='muted'>Generador</span><b class='orange' id='gpct'>0%</b></div><div class='bar' style='margin-top:7px'><i id='barU' class='u' style='width:0%'></i><i id='barG' class='g' style='width:0%'></i></div></div></div></div></section>
+<section class='card' style='margin-bottom:14px'><div class='title'><h2>📡 Dispositivos conectados</h2><span class='tag' id='deviceCount'>0</span></div><div id='devices' class='devices'><div class='empty'>Cargando dispositivos...</div></div><div class='actions' style='margin-top:12px'><a class='btn primary' href='/devices'>Administrar dispositivos</a></div></section>
+<section class='grid g3'><div class='metric'><div class='k'>WiFi RSSI</div><div class='v cyan'><span id='rssi'>--</span><span class='u'> dBm</span></div></div><div class='metric'><div class='k'>Uptime</div><div class='v'><span id='uptime'>--</span></div></div><div class='metric'><div class='k'>Memoria libre</div><div class='v'><span id='heap'>--</span><span class='u'> KB</span></div></div></section>
+<div class='footer'>CYD Power Monitor <span id='version'>V4.0.0</span> · última actualización <span id='last'>--:--:--</span></div>
+</main>
 <script>
-function fmt(s){s=Math.round(s);var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60),sc=s%60,r='';if(d>0)r+=d+'d ';if(h>0||d>0)r+=h+'h ';if(m>0||h>0||d>0)r+=m+'m ';return r+sc+'s';}
-function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}
-function refresh(){
-  fetch('/api/data').then(r=>r.json()).then(d=>{
-    var p=d.pzem,a=d.ats,s=d.system;
-    set('v_volt',p.voltage.toFixed(1));set('v_curr',p.current.toFixed(2));
-    set('v_pow',p.power.toFixed(1));set('v_energy',p.energy.toFixed(1));
-    set('v_kwh',(p.energy/1000).toFixed(3));set('v_freq',p.frequency.toFixed(1));
-    set('v_pf',p.pf.toFixed(2));
-    var ap=p.pf>0?p.power/p.pf:0,rp=Math.sqrt(Math.max(0,ap*ap-p.power*p.power));
-    set('v_app',ap.toFixed(1));set('v_react',rp.toFixed(1));
-    set('v_rssi',s.rssi);set('v_uptime',fmt(s.uptime));
-    set('v_atstime',fmt(a.timeInState));set('v_changes',a.changes);
-    var ub=document.getElementById('bar_util'),gb=document.getElementById('bar_gen');
-    if(ub)ub.style.width=a.utilPct.toFixed(1)+'%';
-    if(gb)gb.style.width=a.genPct.toFixed(1)+'%';
-    set('v_upct',a.utilPct.toFixed(1)+'%');set('v_gpct',a.genPct.toFixed(1)+'%');
-    var badge=document.getElementById('ats_badge'),st=document.getElementById('ats_state');
-    if(a.state==='UTILITY'){
-      if(badge){badge.className='status-badge status-online';badge.textContent='RED ELÉCTRICA';badge.removeAttribute('style');}
-      if(st){st.className='ats-state utility';st.textContent='RED ELÉCTRICA';}
-    }else if(a.state==='GENERATOR'){
-      if(badge){badge.className='status-badge';badge.setAttribute('style','background:rgba(245,158,11,0.15);color:var(--orange)');badge.textContent='GENERADOR';}
-      if(st){st.className='ats-state generator';st.textContent='GENERADOR';}
-    }else{
-      if(badge){badge.className='status-badge status-offline';badge.textContent='DESCONOCIDO';badge.removeAttribute('style');}
-      if(st){st.className='ats-state unknown';st.textContent='DESCONOCIDO';}
-    }
-    set('lastUpdate','Última actualización: '+new Date().toLocaleTimeString());
-  }).catch(()=>{});
+const $=id=>document.getElementById(id);let lastPacket=performance.now(),ws=null,wsOk=false,pollTimer=null;
+function fmt(s){s=Math.max(0,Math.round(s||0));let d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60,r='';if(d)r+=d+'d ';if(h||d)r+=h+'h ';if(m||h||d)r+=m+'m ';return r+x+'s'}
+function put(id,v){let e=$(id);if(e)e.textContent=v}
+function render(d){let t=performance.now();put('latency',Math.round(t-lastPacket)+' ms');lastPacket=t;let p=d.pzem||{},a=d.ats||{},s=d.system||{};put('power',p.valid?(+p.power).toFixed(1):'--');put('volt',p.valid?(+p.voltage).toFixed(1):'--');put('curr',p.valid?(+p.current).toFixed(2):'--');put('pf',p.valid?(+p.pf).toFixed(2):'--');put('freq',p.valid?(+p.frequency).toFixed(1):'--');let ap=p.pf>0?p.power/p.pf:0,rp=Math.sqrt(Math.max(0,ap*ap-p.power*p.power));put('app',p.valid?ap.toFixed(1):'--');put('react',p.valid?rp.toFixed(1):'--');put('energy',p.valid?(+p.energy).toFixed(1):'--');put('rssi',s.rssi);put('ip',s.ip||'--');put('uptime',fmt(s.uptime));put('heap',Math.round((s.freeHeap||0)/1024));put('version',s.version||'V4');put('changes',(a.changes||0)+' cambios');put('atsTime',fmt(a.timeInState));put('upct',(+(a.utilPct||0)).toFixed(1)+'%');put('gpct',(+(a.genPct||0)).toFixed(1)+'%');$('barU').style.width=(+a.utilPct||0)+'%';$('barG').style.width=(+a.genPct||0)+'%';let st=$('atsState'),src=$('source'),txt=a.state==='UTILITY'?'RED ELÉCTRICA':a.state==='GENERATOR'?'GENERADOR':'DESCONOCIDO';st.textContent=txt;st.className='atsState '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');src.className='source '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');put('sourceText',txt);put('last',new Date().toLocaleTimeString());$('conn').textContent='ONLINE'}
+function renderDevices(list){let box=$('devices');if(!Array.isArray(list)||!list.length){box.innerHTML='<div class="empty">No hay dispositivos configurados.</div>';put('deviceCount','0');return}put('deviceCount',list.length+' dispositivos');box.innerHTML=list.map(d=>{let on=!!d.state;let energy=d.hasEnergyMonitoring&&d.metricsValid?`<div class="dmetrics"><span><b>${(+d.power).toFixed(0)}</b> W</span><span><b>${(+d.voltage).toFixed(0)}</b> V</span><span><b>${(+d.current).toFixed(2)}</b> A</span></div>`:'<div class="dmetrics"><span>Control ON/OFF</span></div>';return `<div class="device"><div class="deviceHead"><div class="deviceName">${escapeHtml(d.name||'Dispositivo')}</div><span class="state ${on?'on':'off'}">${on?'ON':'OFF'}</span></div>${energy}</div>`}).join('')}
+function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+async function fetchData(){try{let r=await fetch('/api/data',{cache:'no-store'});if(!r.ok)throw 0;render(await r.json())}catch(e){$('conn').textContent='SIN RESPUESTA'}}
+async function fetchDevices(){try{let r=await fetch('/api/devices',{cache:'no-store'});if(r.ok)renderDevices(await r.json())}catch(e){}}
+function startFallback(){if(pollTimer)return;put('channel','HTTP LIVE');pollTimer=setInterval(()=>{fetchData();fetchDevices()},1000);fetchData();fetchDevices()}
+function connectWS(){
+  if(!('WebSocket' in window)){startFallback();return}
+  try{ws=new WebSocket('ws://'+location.hostname+':81/')}catch(e){startFallback();return}
+  ws.onopen=()=>{wsOk=true;put('channel','WEBSOCKET LIVE');$('channel').className='live ws';fetchDevices()}
+  ws.onmessage=e=>{try{render(JSON.parse(e.data))}catch(x){}}
+  ws.onclose=()=>{wsOk=false;$('channel').className='live';startFallback();setTimeout(connectWS,3000)}
+  ws.onerror=()=>{try{ws.close()}catch(e){}}
 }
-refresh();setInterval(refresh,)rawliteral");
-    page += String(WEB_REFRESH_INTERVAL * 1000);
-    page += F(R"rawliteral();
-</script>
-</body>
-</html>)rawliteral");
-    
+connectWS();
+</script></body></html>)rawliteral");
     return page;
 }
 
@@ -2104,6 +1812,27 @@ String getJsonData() {
     return output;
 }
 
+String getDevicesJsonData() {
+    DynamicJsonDocument doc(6144);
+    JsonArray arr = doc.to<JsonArray>();
+    if (devicesMutex != NULL) xSemaphoreTake(devicesMutex, portMAX_DELAY);
+    for (int i = 0; i < deviceCount; i++) {
+        JsonObject d = arr.createNestedObject();
+        d["name"] = devices[i].name;
+        d["state"] = devices[i].state;
+        d["hasEnergyMonitoring"] = devices[i].hasEnergyMonitoring;
+        d["metricsValid"] = devices[i].metricsValid;
+        d["power"] = devices[i].lastPower;
+        d["voltage"] = devices[i].lastVoltage;
+        d["current"] = devices[i].lastCurrent;
+        d["pollFailures"] = devices[i].pollFailures;
+    }
+    if (devicesMutex != NULL) xSemaphoreGive(devicesMutex);
+    String out;
+    serializeJson(doc, out);
+    return out;
+}
+
 // ============================================
 // WEB SERVER ROUTES
 // ============================================
@@ -2657,6 +2386,38 @@ bool checkRateLimit() {
     return rateLimitRequestCount <= RATE_LIMIT_MAX_REQUESTS;
 }
 
+#if CYD_V4_HAS_WEBSOCKET
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+    if (type == WStype_CONNECTED) {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("V4 WebSocket conectado: %s\n", ip.toString().c_str());
+        webSocket.sendTXT(num, getJsonData());
+    } else if (type == WStype_DISCONNECTED) {
+        Serial.printf("V4 WebSocket desconectado: #%u\n", num);
+    }
+}
+
+void webSocketBeginV4() {
+    webSocket.begin();
+    webSocket.onEvent(webSocketEvent);
+    Serial.println("V4 WebSocket activo en puerto 81");
+}
+
+void webSocketTickV4() {
+    webSocket.loop();
+    unsigned long now = millis();
+    if (now - wsLastBroadcast >= 250) {
+        wsLastBroadcast = now;
+        webSocket.broadcastTXT(getJsonData());
+    }
+}
+#else
+void webSocketBeginV4() {
+    Serial.println("V4 WebSocket no instalado: usando fallback HTTP 1s");
+}
+void webSocketTickV4() {}
+#endif
+
 void webServerSetup() {
     // Main dashboard
     server.on("/", HTTP_GET, []() {
@@ -2710,6 +2471,17 @@ void webServerSetup() {
     server.on("/api/data", HTTP_GET, []() {
         server.sendHeader("Access-Control-Allow-Origin", "*");
         server.send(200, "application/json", getJsonData());
+    });
+
+    // V4: estado de dispositivos separado para no inflar el paquete de telemetria principal.
+    server.on("/api/devices", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+            return;
+        }
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.sendHeader("Cache-Control", "no-store");
+        server.send(200, "application/json", getDevicesJsonData());
     });
     
     // ATS history JSON
@@ -2979,8 +2751,9 @@ void setup() {
         ntpTimeBegin();
     }
     
-    // Web server
+    // Web server + canal WebSocket V4 (si la libreria esta instalada)
     webServerSetup();
+    webSocketBeginV4();
     
     setLED(false, true, false);  // Green = ready
     
@@ -3007,8 +2780,9 @@ void setup() {
 void loop() {
     unsigned long now = millis();
     
-    // Handle web requests
+    // Handle web requests + canal de telemetria V4
     server.handleClient();
+    webSocketTickV4();
     
     // Check boot button for WiFi reset
     checkBootButton();
