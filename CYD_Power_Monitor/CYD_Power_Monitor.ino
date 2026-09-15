@@ -1071,15 +1071,15 @@ String getMainPage() {
 </main>
 <script>
 const $=id=>document.getElementById(id);let lastPacket=performance.now(),ws=null,wsOk=false,pollTimer=null;
-;function fmt(s){s=Math.max(0,Math.round(s||0));let d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60,r='';if(d)r+=d+'d ';if(h||d)r+=h+'h ';if(m||h||d)r+=m+'m ';return r+x+'s'}
-;function put(id,v){let e=$(id);if(e)e.textContent=v}
-;function render(d){let t=performance.now();put('latency',Math.round(t-lastPacket)+' ms');lastPacket=t;let p=d.pzem||{},a=d.ats||{},s=d.system||{};put('power',p.valid?(+p.power).toFixed(1):'--');put('volt',p.valid?(+p.voltage).toFixed(1):'--');put('curr',p.valid?(+p.current).toFixed(2):'--');put('pf',p.valid?(+p.pf).toFixed(2):'--');put('freq',p.valid?(+p.frequency).toFixed(1):'--');let ap=p.pf>0?p.power/p.pf:0,rp=Math.sqrt(Math.max(0,ap*ap-p.power*p.power));put('app',p.valid?ap.toFixed(1):'--');put('react',p.valid?rp.toFixed(1):'--');put('energy',p.valid?(+p.energy).toFixed(1):'--');put('rssi',s.rssi);put('ip',s.ip||'--');put('uptime',fmt(s.uptime));put('heap',Math.round((s.freeHeap||0)/1024));put('version',s.version||'V4');put('changes',(a.changes||0)+' cambios');put('atsTime',fmt(a.timeInState));put('upct',(+(a.utilPct||0)).toFixed(1)+'%');put('gpct',(+(a.genPct||0)).toFixed(1)+'%');$('barU').style.width=(+a.utilPct||0)+'%';$('barG').style.width=(+a.genPct||0)+'%';let st=$('atsState'),src=$('source'),txt=a.state==='UTILITY'?'RED ELÉCTRICA':a.state==='GENERATOR'?'GENERADOR':'DESCONOCIDO';st.textContent=txt;st.className='atsState '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');src.className='source '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');put('sourceText',txt);put('last',new Date().toLocaleTimeString());$('conn').textContent='ONLINE'}
-;function renderDevices(list){let box=$('devices');if(!Array.isArray(list)||!list.length){box.innerHTML='<div class="empty">No hay dispositivos configurados.</div>';put('deviceCount','0');return}put('deviceCount',list.length+' dispositivos');box.innerHTML=list.map(d=>{let on=!!d.state;let energy=d.hasEnergyMonitoring&&d.metricsValid?`<div class="dmetrics"><span><b>${(+d.power).toFixed(0)}</b> W</span><span><b>${(+d.voltage).toFixed(0)}</b> V</span><span><b>${(+d.current).toFixed(2)}</b> A</span></div>`:'<div class="dmetrics"><span>Control ON/OFF</span></div>';return `<div class="device"><div class="deviceHead"><div class="deviceName">${escapeHtml(d.name||'Dispositivo')}</div><span class="state ${on?'on':'off'}">${on?'ON':'OFF'}</span></div>${energy}</div>`}).join('')}
-;function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-;async function fetchData(){try{let r=await fetch('/api/data',{cache:'no-store'});if(!r.ok)throw 0;render(await r.json())}catch(e){$('conn').textContent='SIN RESPUESTA'}}
-;async function fetchDevices(){try{let r=await fetch('/api/devices',{cache:'no-store'});if(r.ok)renderDevices(await r.json())}catch(e){}}
-;function startFallback(){if(pollTimer)return;put('channel','HTTP LIVE');pollTimer=setInterval(()=>{fetchData();fetchDevices()},1000);fetchData();fetchDevices()}
-;function connectWS(){
+const fmt=(s)=>{s=Math.max(0,Math.round(s||0));let d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60,r='';if(d)r+=d+'d ';if(h||d)r+=h+'h ';if(m||h||d)r+=m+'m ';return r+x+'s'}
+const put=(id,v)=>{let e=$(id);if(e)e.textContent=v}
+const render=(d)=>{let t=performance.now();put('latency',Math.round(t-lastPacket)+' ms');lastPacket=t;let p=d.pzem||{},a=d.ats||{},s=d.system||{};put('power',p.valid?(+p.power).toFixed(1):'--');put('volt',p.valid?(+p.voltage).toFixed(1):'--');put('curr',p.valid?(+p.current).toFixed(2):'--');put('pf',p.valid?(+p.pf).toFixed(2):'--');put('freq',p.valid?(+p.frequency).toFixed(1):'--');let ap=p.pf>0?p.power/p.pf:0,rp=Math.sqrt(Math.max(0,ap*ap-p.power*p.power));put('app',p.valid?ap.toFixed(1):'--');put('react',p.valid?rp.toFixed(1):'--');put('energy',p.valid?(+p.energy).toFixed(1):'--');put('rssi',s.rssi);put('ip',s.ip||'--');put('uptime',fmt(s.uptime));put('heap',Math.round((s.freeHeap||0)/1024));put('version',s.version||'V4');put('changes',(a.changes||0)+' cambios');put('atsTime',fmt(a.timeInState));put('upct',(+(a.utilPct||0)).toFixed(1)+'%');put('gpct',(+(a.genPct||0)).toFixed(1)+'%');$('barU').style.width=(+a.utilPct||0)+'%';$('barG').style.width=(+a.genPct||0)+'%';let st=$('atsState'),src=$('source'),txt=a.state==='UTILITY'?'RED ELÉCTRICA':a.state==='GENERATOR'?'GENERADOR':'DESCONOCIDO';st.textContent=txt;st.className='atsState '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');src.className='source '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');put('sourceText',txt);put('last',new Date().toLocaleTimeString());$('conn').textContent='ONLINE'}
+const renderDevices=(list)=>{let box=$('devices');if(!Array.isArray(list)||!list.length){box.innerHTML='<div class="empty">No hay dispositivos configurados.</div>';put('deviceCount','0');return}put('deviceCount',list.length+' dispositivos');box.innerHTML=list.map(d=>{let on=!!d.state;let energy=d.hasEnergyMonitoring&&d.metricsValid?`<div class="dmetrics"><span><b>${(+d.power).toFixed(0)}</b> W</span><span><b>${(+d.voltage).toFixed(0)}</b> V</span><span><b>${(+d.current).toFixed(2)}</b> A</span></div>`:'<div class="dmetrics"><span>Control ON/OFF</span></div>';return `<div class="device"><div class="deviceHead"><div class="deviceName">${escapeHtml(d.name||'Dispositivo')}</div><span class="state ${on?'on':'off'}">${on?'ON':'OFF'}</span></div>${energy}</div>`}).join('')}
+const escapeHtml=(s)=>{return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+const fetchData=async()=>{try{let r=await fetch('/api/data',{cache:'no-store'});if(!r.ok)throw 0;render(await r.json())}catch(e){$('conn').textContent='SIN RESPUESTA'}}
+const fetchDevices=async()=>{try{let r=await fetch('/api/devices',{cache:'no-store'});if(r.ok)renderDevices(await r.json())}catch(e){}}
+const startFallback=()=>{if(pollTimer)return;put('channel','HTTP LIVE');pollTimer=setInterval(()=>{fetchData();fetchDevices()},1000);fetchData();fetchDevices()}
+const connectWS=()=>{
   if(!('WebSocket' in window)){startFallback();return}
   try{ws=new WebSocket('ws://'+location.hostname+':81/')}catch(e){startFallback();return}
   ws.onopen=()=>{wsOk=true;put('channel','WEBSOCKET LIVE');$('channel').className='live ws';fetchDevices()}
@@ -1705,13 +1705,13 @@ dropZone.addEventListener('drop', function(e) {
   }
 });
 
-;function showStatus(msg, type) {
+const showStatus=(msg, type)=>{
   statusMsg.textContent = msg;
   statusMsg.className = 'status-msg ' + type;
   statusMsg.style.display = 'block';
 }
 
-;function startUpload() {
+const startUpload=()=>{
   const file = firmware.files[0];
   if (!file) { showStatus('Selecciona un archivo primero.', 'error'); return; }
 
@@ -1755,7 +1755,7 @@ dropZone.addEventListener('drop', function(e) {
   xhr.send(formData);
 }
 
-;function rebootDevice() {
+const rebootDevice=()=>{
   if (confirm('¿Confirmas que deseas reiniciar el dispositivo?')) {
     showStatus('🔄 Enviando comando de reinicio...', 'info');
     fetch('/reboot', { method: 'POST' })
