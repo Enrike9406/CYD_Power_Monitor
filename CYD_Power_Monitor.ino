@@ -1,0 +1,2931 @@
+/*
+ * CYD-PZEM-ATS-Monitor V4.0
+ * 
+ * Proyecto para CYD2USB (ESP32-2432S028) que monitorea un PZEM-004T 
+ * y el estado de un ATS (Automatic Transfer Switch).
+ * 
+ * V4.0 - Dashboard SPA ligero + WebSocket opcional + telemetria 1s + UX optimizada
+ *   - Modern industrial web dashboard with real-time charts
+ *   - Detailed ATS history with statistics and visual timeline
+ *   - Professional dark theme with data visualization
+ * 
+ * v2.0 - Professional industrial dashboard with ATS history
+ *   - Industrial-style web dashboard
+ *   - ATS history page with time filters
+ *   - Circular buffer for history storage
+ * 
+ * v1.0 - Initial release with:
+ *   - PZEM-004T monitoring via Serial2
+ *   - ATS status monitoring via GPIO35
+ *   - Web dashboard with auto-refresh
+ *   - OTA firmware update
+ *   - WiFiManager with portal
+ *   - Boot button WiFi reset (5s hold)
+ *   - CYD2USB gamma fix
+ */
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
+#include <WebServer.h>
+#include <Update.h>
+#include <ArduinoJson.h>
+#include <TFT_eSPI.h>
+#include <PZEM004Tv30.h>
+#include <SPIFFS.h>
+#include <Preferences.h>
+
+// WebSocket opcional: si la libreria ArduinoWebsockets/WebSocketsServer esta
+// instalada, el dashboard usa actualizacion push en tiempo real. Si no esta
+// instalada, V4 cae automaticamente a polling HTTP de 1 segundo.
+#if __has_include(<WebSocketsServer.h>)
+  #include <WebSocketsServer.h>
+  #define CYD_V4_HAS_WEBSOCKET 1
+#else
+  #define CYD_V4_HAS_WEBSOCKET 0
+#endif
+
+// ============================================
+// CONFIGURACION
+// ============================================
+#define WIFI_MANAGER_TIMEOUT 180
+#define HOSTNAME_PREFIX "CYD-Monitor"
+#define WEB_SERVER_PORT 80
+#define DISPLAY_WIDTH 320
+#define DISPLAY_HEIGHT 240
+#define DISPLAY_ORIENTATION 1
+#define DISPLAY_UPDATE_INTERVAL 1500
+#define PZEM_RX_PIN 27
+#define PZEM_TX_PIN 22
+#define PZEM_BAUD_RATE 9600
+#define PZEM_READ_INTERVAL 1000
+#define ATS_STATUS_PIN 35
+#define ATS_DEBOUNCE_DELAY 500
+#define ATS_STABLE_COUNT 10
+#define LED_RED_PIN 4
+#define LED_GREEN_PIN 16
+#define LED_BLUE_PIN 17
+#define LDR_PIN 34
+#define BOOT_BUTTON_PIN 0
+#define DEBUG_BAUD_RATE 115200
+#define WEB_REFRESH_INTERVAL 1
+#define BOOT_RESET_HOLD_TIME 5000
+#define FIRMWARE_VERSION "4.0.0-V4"
+#define MAX_HISTORY_ENTRIES 300
+#define HISTORY_SAVE_INTERVAL 60000
+#define SCHEDULER_CHECK_INTERVAL 1500
+
+// ============================================
+// ENUMS Y ESTRUCTURAS
+// ============================================
+enum ATSState { ATS_UTILITY_POWER, ATS_GENERATOR_POWER, ATS_UNKNOWN };
+
+struct PZEMData {
+    float voltage = 0.0;
+    float current = 0.0;
+    float power = 0.0;
+    float energy = 0.0;
+    float frequency = 0.0;
+    float pf = 0.0;
+    bool isValid = false;
+    unsigned long lastRead = 0;
+};
+
+struct ATSHistoryEntry {
+    unsigned long timestamp;  // Unix timestamp
+    ATSState state;
+    unsigned long duration;   // Duration in seconds
+};
+
+// ============================================
+// VARIABLES GLOBALES
+// ============================================
+TFT_eSPI tft;
+PZEM004Tv30 pzem(&Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
+WebServer server(WEB_SERVER_PORT);
+WiFiManager wm;
+
+// ============================================
+// PROTOTIPOS MANUALES DE TODAS LAS FUNCIONES
+// El generador automatico de prototipos de Arduino fallo en algun punto
+// del archivo (probablemente por el JS embebido en las paginas web) y
+// dejo de declarar las funciones usadas antes de su definicion. Se
+// declaran TODAS aqui a mano para no depender de ese mecanismo.
+// ============================================
+void checkBootButton();
+void setLED(bool red, bool green, bool blue);
+void atsBegin();
+void atsUpdate();
+String atsGetStateString(ATSState state);
+unsigned long atsGetTimeInState();
+void historySaveToFlash();
+void historyLoadFromFlash();
+void atsAddHistoryEntry(ATSState newState, unsigned long duration);
+String formatRealTimestamp(unsigned long epoch);
+String buildDailyTrendChart();
+String atsGetStateName(ATSState state);
+String atsGetStateColor(ATSState state);
+String formatDuration(unsigned long seconds);
+String formatDurationLong(unsigned long seconds);
+unsigned long atsGetTotalTimeInState(ATSState targetState);
+float atsGetPercentageInState(ATSState targetState);
+int atsGetStateChangesCount(ATSState targetState);
+unsigned long atsGetAverageDuration(ATSState targetState);
+unsigned long atsGetMaxDuration(ATSState targetState);
+unsigned long atsGetMinDuration(ATSState targetState);
+bool pzemBegin();
+void pzemTaskBegin();
+String pzemGetStatusString();
+void uiResetDrawState();
+void uiText(int x, int y, const String& text, uint16_t color, uint8_t size);
+void uiClearValue(int x, int y, int w, int h, uint16_t bg);
+void displayBegin();
+void displayDrawHeader();
+void displayDrawSourceCard();
+void displayDrawMetricCards();
+void displayDrawFooter();
+void displayRenderCurrentTheme();
+void displayUpdate();
+void displayShowMessage(const String& message, int duration);
+void displayWiFiPortalInfo();
+String getMainPage();
+String getHistoryPage(String filter);
+String getOTAPage();
+String getJsonData();
+String getDevicesJsonData();
+const char* uiThemeName(uint8_t theme);
+void uiLoadTheme();
+void uiSaveTheme();
+void uiSetTheme(uint8_t theme);
+void uiNextTheme();
+String themeSourceName();
+uint16_t themeSourceColor();
+String themePower();
+String themeVoltage();
+String themeCurrent();
+String themePF();
+String themeFrequency();
+String themeEnergy();
+void themeHeader(const String& title, uint16_t bg, uint16_t accent, uint16_t text, uint16_t muted);
+void themeFooter(uint16_t bg, uint16_t muted);
+void themeDrawSCADA();
+void themeDrawMinimal();
+void themeDrawCyberpunk();
+String uiClockText();
+void themeDrawRetro();
+void themeDrawGlass();
+void displayDrawDeviceListRetro();
+void displayDrawDeviceList();
+bool checkRateLimit();
+#if CYD_V4_HAS_WEBSOCKET
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
+#endif
+void webSocketBeginV4();
+void webSocketTickV4();
+void webServerSetup();
+bool wifiSetup();
+void setup();
+void loop();
+#if CYD_V4_HAS_WEBSOCKET
+WebSocketsServer webSocket(81);
+unsigned long wsLastBroadcast = 0;
+#endif
+
+
+// ============================================
+// THEME ENGINE - ESTADO GLOBAL
+// Debe estar definido antes de cualquier funcion
+// que responda al boton BOOT.
+// ============================================
+Preferences themePreferences;
+
+enum UITheme : uint8_t {
+    THEME_SCADA = 0,
+    THEME_MINIMAL,
+    THEME_CYBERPUNK,
+    THEME_RETRO,
+    THEME_GLASS,
+    THEME_TESLA
+};
+
+static uint8_t currentTheme = THEME_TESLA;
+static uint8_t previousTheme = THEME_TESLA;
+
+
+PZEMData pzemData;
+ATSState atsState = ATS_UNKNOWN;
+ATSState atsLastState = ATS_UNKNOWN;
+unsigned long atsLastStateChange = 0;
+unsigned long atsLastDebounce = 0;
+int atsStableCounter = 0;
+
+String wifiStatusStr = "WiFi: Connecting...";
+String pzemStatusStr = "PZEM: Initializing...";
+
+unsigned long pzemLastRead = 0;
+unsigned long displayLastUpdate = 0;
+unsigned long wifiReconnectCheck = 0;
+unsigned long bootButtonPressStart = 0;
+bool bootButtonPressed = false;
+bool bootResetActive = false;
+
+bool pzemInitialized = false;
+bool displayInitialized = false;
+
+// ATS History storage (circular buffer)
+ATSHistoryEntry atsHistory[MAX_HISTORY_ENTRIES];
+int historyIndex = 0;
+int historyCount = 0;
+unsigned long historyLastSave = 0;
+unsigned long schedulerLastCheck = 0;
+unsigned long atsAutoLastCheck = 0;
+unsigned long brightnessLastCheck = 0;
+
+// Rate limiting para API web
+#define RATE_LIMIT_WINDOW_MS 60000  // 1 minuto
+#define RATE_LIMIT_MAX_REQUESTS 240 // max 240 requests por minuto (compatible con polling de 1 s + margen)
+unsigned long rateLimitWindowStart = 0;
+int rateLimitRequestCount = 0;
+
+// API key para OTA (cambiar por un valor seguro en produccion)
+#define OTA_API_KEY "CYD-Monitor-OTA-2024"
+
+// ============================================
+// PALETA DE COLORES - Diseño Elegante Industrial
+// ============================================
+const uint16_t COLOR_BG        = 0x0000;  // Negro profundo
+const uint16_t COLOR_BG_ALT    = 0x1082;  // Azul muy oscuro (alterno)
+const uint16_t COLOR_WHITE     = 0xFFFF;  // Blanco puro
+const uint16_t COLOR_CYAN      = 0x07FF;  // Cyan brillante
+const uint16_t COLOR_GREEN     = 0x07E0;  // Verde
+const uint16_t COLOR_ORANGE    = 0xFD20;  // Naranja
+const uint16_t COLOR_RED       = 0xF800;  // Rojo
+const uint16_t COLOR_YELLOW    = 0xFFE0;  // Amarillo
+const uint16_t COLOR_BLUE      = 0x001F;  // Azul
+const uint16_t COLOR_MUTED     = 0x9CD3;  // Gris azulado
+const uint16_t COLOR_DARK_GRAY = 0x7BEF;  // Gris oscuro
+const uint16_t COLOR_CARD      = 0x18C3;  // Fondo de tarjetas
+const uint16_t COLOR_CARD_BG   = 0x2104;  // Fondo de tarjetas alterno
+const uint16_t COLOR_BORDER    = 0x2945;  // Borde sutil
+const uint16_t COLOR_ACCENT    = 0x07FF;  // Color de acento (cyan)
+
+const int HEADER_HEIGHT = 34;
+const int FOOTER_HEIGHT = 20;
+const int COL1_X = 5;
+const int COL2_X = 165;
+const int ROW_Y_START = 30;
+const int ROW_HEIGHT = 22;
+
+// ============================================
+// BOOT BUTTON
+// ============================================
+void checkBootButton() {
+    int buttonState = digitalRead(BOOT_BUTTON_PIN);
+    
+    if (buttonState == LOW && !bootButtonPressed) {
+        bootButtonPressed = true;
+        bootButtonPressStart = millis();
+        bootResetActive = true;
+        Serial.println("Boot button pressed - hold 5s to reset WiFi");
+    }
+    
+    if (buttonState == HIGH) {
+        if (bootButtonPressed) {
+            unsigned long pressTime = millis() - bootButtonPressStart;
+            // Pulsacion corta: cambia de tema. 5 s o mas: conserva el reset WiFi.
+            if (pressTime < BOOT_RESET_HOLD_TIME) {
+                uiNextTheme();
+                Serial.println("Theme changed: " + String(uiThemeName(currentTheme)));
+            }
+        }
+        bootButtonPressed = false;
+        bootResetActive = false;
+    }
+    
+    if (bootResetActive && buttonState == LOW) {
+        unsigned long holdTime = millis() - bootButtonPressStart;
+        if (holdTime >= BOOT_RESET_HOLD_TIME) {
+            Serial.println("WiFi reset triggered!");
+            tft.fillScreen(COLOR_BG);
+            tft.setTextColor(COLOR_RED);
+            tft.setTextSize(2);
+            tft.setCursor(20, 50);
+            tft.print("WiFi Reset!");
+            tft.setTextColor(COLOR_WHITE);
+            tft.setTextSize(1);
+            tft.setCursor(20, 90);
+            tft.print("Erasing credentials...");
+            
+            wm.resetSettings();
+            WiFi.disconnect(true, true);
+            delay(500);
+            WiFi.mode(WIFI_OFF);
+            delay(500);
+            ESP.restart();
+        }
+        
+        if (holdTime > 1000) {
+            int progress = (holdTime * 100) / BOOT_RESET_HOLD_TIME;
+            tft.fillRect(20, 120, 280, 20, COLOR_DARK_GRAY);
+            tft.fillRect(20, 120, (280 * progress) / 100, 20, COLOR_RED);
+            tft.setTextColor(COLOR_WHITE);
+            tft.setCursor(20, 123);
+            tft.printf("Reset: %d%%", progress);
+        }
+    }
+}
+
+// ============================================
+// LED
+// ============================================
+void setLED(bool red, bool green, bool blue) {
+    digitalWrite(LED_RED_PIN, red ? LOW : HIGH);
+    digitalWrite(LED_GREEN_PIN, green ? LOW : HIGH);
+    digitalWrite(LED_BLUE_PIN, blue ? LOW : HIGH);
+}
+
+// ============================================
+// ATS
+// ============================================
+// V4: primera correccion de dispositivos se dispara en el mismo instante
+// en que el cambio ATS queda confirmado; el device manager sigue haciendo
+// las comprobaciones periodicas como respaldo.
+void enforceAtsAutomation();
+
+void atsBegin() {
+    pinMode(ATS_STATUS_PIN, INPUT);
+    int reading = digitalRead(ATS_STATUS_PIN);
+    atsState = (reading == HIGH) ? ATS_UTILITY_POWER : ATS_GENERATOR_POWER;
+    atsLastState = atsState;
+    atsLastStateChange = millis();
+    Serial.print("ATS initialized. State: ");
+    Serial.println(atsGetStateString(atsState));
+}
+
+void atsUpdate() {
+    unsigned long now = millis();
+    if (now - atsLastDebounce < ATS_DEBOUNCE_DELAY) return;
+
+    int readings[3];
+    for (int i = 0; i < 3; i++) {
+        readings[i] = digitalRead(ATS_STATUS_PIN);
+    }
+    int highCount = 0;
+    for (int i = 0; i < 3; i++) if (readings[i] == HIGH) highCount++;
+    ATSState newState = (highCount >= 2) ? ATS_UTILITY_POWER : ATS_GENERATOR_POWER;
+    
+    if (newState != atsState) {
+        atsState = newState;
+        atsLastDebounce = now;
+        atsStableCounter = 0;
+        atsLastStateChange = now; // Update timestamp on every actual state change
+    } else {
+        atsStableCounter++;
+        if (atsStableCounter >= ATS_STABLE_COUNT && atsState != atsLastState) {
+            unsigned long duration = (now - atsLastStateChange) / 1000;
+            atsAddHistoryEntry(atsState, duration);
+            atsLastState = atsState;
+            atsLastStateChange = now;
+            Serial.print("ATS changed to: ");
+            Serial.println(atsGetStateString(atsState));
+
+            // V4: accion inmediata. No esperamos al siguiente ciclo del
+            // administrador de dispositivos para iniciar el primer comando.
+            // El polling posterior confirma el estado real de cada dispositivo.
+            enforceAtsAutomation();
+        }
+    }
+}
+
+String atsGetStateString(ATSState state) {
+    switch (state) {
+        case ATS_UTILITY_POWER: return "SEN";
+        case ATS_GENERATOR_POWER: return "INVERSOR";
+        default: return "DESCONOCIDO";
+    }
+}
+
+unsigned long atsGetTimeInState() {
+    return (millis() - atsLastStateChange) / 1000;
+}
+
+// ============================================
+// ATS HISTORY
+// ============================================
+#define HISTORY_FILE "/ats_history.bin"
+
+// Guarda TODO el buffer de historial de una sola vez. Se llama solo cuando
+// hay un cambio de estado real (pocas veces al dia), asi que reescribir el
+// archivo completo cada vez es simple y no desgasta la flash.
+void historySaveToFlash() {
+    // Throttling: no escribir mas de una vez por HISTORY_SAVE_INTERVAL
+    unsigned long now = millis();
+    if (now - historyLastSave < HISTORY_SAVE_INTERVAL) return;
+    historyLastSave = now;
+
+    File f = SPIFFS.open(HISTORY_FILE, FILE_WRITE);
+    if (!f) {
+        Serial.println("historySaveToFlash: no se pudo abrir el archivo");
+        return;
+    }
+    f.write((uint8_t*)&historyCount, sizeof(historyCount));
+    f.write((uint8_t*)&historyIndex, sizeof(historyIndex));
+    f.write((uint8_t*)atsHistory, sizeof(ATSHistoryEntry) * MAX_HISTORY_ENTRIES);
+    f.close();
+}
+
+void historyLoadFromFlash() {
+    if (!SPIFFS.exists(HISTORY_FILE)) {
+        Serial.println("historyLoadFromFlash: sin historial previo guardado");
+        return;
+    }
+    File f = SPIFFS.open(HISTORY_FILE, FILE_READ);
+    if (!f) return;
+    size_t expected = sizeof(historyCount) + sizeof(historyIndex) + sizeof(ATSHistoryEntry) * MAX_HISTORY_ENTRIES;
+    if (f.size() != expected) {
+        // Archivo de una version anterior con otro tamano de MAX_HISTORY_ENTRIES
+        Serial.println("historyLoadFromFlash: archivo de tamano distinto, se ignora");
+        f.close();
+        return;
+    }
+    f.read((uint8_t*)&historyCount, sizeof(historyCount));
+    f.read((uint8_t*)&historyIndex, sizeof(historyIndex));
+    f.read((uint8_t*)atsHistory, sizeof(ATSHistoryEntry) * MAX_HISTORY_ENTRIES);
+    f.close();
+    Serial.printf("historyLoadFromFlash: %d entradas restauradas\n", historyCount);
+}
+
+void atsAddHistoryEntry(ATSState newState, unsigned long duration) {
+    // Hora real (epoch UTC) si ya esta sincronizada (NTP o telefono); si no,
+    // se guarda 0 y se muestra como "hora no disponible" en vez de inventar
+    // una fecha incorrecta con millis().
+    time_t nowEpoch = time(nullptr);
+    atsHistory[historyIndex].timestamp = (nowEpoch > 100000) ? (unsigned long)nowEpoch : 0;
+    atsHistory[historyIndex].state = newState;
+    atsHistory[historyIndex].duration = duration;
+    historyIndex = (historyIndex + 1) % MAX_HISTORY_ENTRIES;
+    if (historyCount < MAX_HISTORY_ENTRIES) historyCount++;
+    historySaveToFlash();
+}
+
+// Formatea un epoch UTC real como fecha/hora legible. Distinto de
+// formatDuration/formatDurationLong, que formatean intervalos de tiempo.
+String formatRealTimestamp(unsigned long epoch) {
+    if (epoch < 100000) return "Hora no disponible";
+    time_t t = (time_t)epoch;
+    struct tm ti;
+    localtime_r(&t, &ti);
+    char buf[24];
+    strftime(buf, sizeof(buf), "%d/%m %H:%M", &ti);
+    return String(buf);
+}
+
+/*
+ * Estos headers dependen de simbolos definidos arriba:
+ * LDR_PIN, FIRMWARE_VERSION, SCHEDULER_CHECK_INTERVAL,
+ * ATSState/atsState y atsGetStateString().
+ * device_pages.h tambien necesita checkRateLimit(), que
+ * se declara aqui antes de incluirlo.
+ */
+bool checkRateLimit();
+
+#include "device_manager.h"
+#include "device_pages.h"
+
+
+// Grafica de tendencia diaria (Red vs Generador) como SVG generado en el
+// servidor - sin librerias externas, coherente con el resto del proyecto.
+// Solo cuenta entradas con hora real valida (timestamp >= 100000); las
+// entradas antiguas guardadas antes de tener hora sincronizada se omiten.
+String buildDailyTrendChart() {
+    struct DayBucket { int year, mon, mday; unsigned long utilitySec; unsigned long generatorSec; };
+    const int MAX_DAYS = 14;
+    DayBucket days[MAX_DAYS];
+    int dayCount = 0;
+
+    for (int i = 0; i < historyCount; i++) {
+        if (atsHistory[i].timestamp < 100000) continue;
+        time_t t = (time_t)atsHistory[i].timestamp;
+        struct tm ti;
+        localtime_r(&t, &ti);
+
+        int found = -1;
+        for (int d = 0; d < dayCount; d++) {
+            if (days[d].year == ti.tm_year && days[d].mon == ti.tm_mon && days[d].mday == ti.tm_mday) { found = d; break; }
+        }
+        if (found < 0) {
+            if (dayCount < MAX_DAYS) {
+                found = dayCount++;
+                days[found] = { ti.tm_year, ti.tm_mon, ti.tm_mday, 0, 0 };
+            } else {
+                continue;
+            }
+        }
+        if (atsHistory[i].state == ATS_UTILITY_POWER) days[found].utilitySec += atsHistory[i].duration;
+        else days[found].generatorSec += atsHistory[i].duration;
+    }
+
+    if (dayCount == 0) {
+        return "<div style='text-align:center;padding:30px;color:var(--muted)'>Sin datos suficientes con hora real para mostrar tendencia diaria (se sincroniza al abrir /devices desde el telefono)</div>";
+    }
+
+    // Orden cronologico ascendente (insertion sort, dayCount <= 14)
+    for (int i = 1; i < dayCount; i++) {
+        DayBucket key = days[i];
+        int j = i - 1;
+        while (j >= 0 && (days[j].year > key.year ||
+              (days[j].year == key.year && days[j].mon > key.mon) ||
+              (days[j].year == key.year && days[j].mon == key.mon && days[j].mday > key.mday))) {
+            days[j + 1] = days[j];
+            j--;
+        }
+        days[j + 1] = key;
+    }
+
+    int w = 700, h = 220, padLeft = 15, padRight = 15, padBottom = 26, padTop = 10;
+    int chartW = w - padLeft - padRight;
+    int chartH = h - padTop - padBottom;
+    int barGroupW = chartW / dayCount;
+    int barW = min(26, barGroupW / 2 - 3);
+    if (barW < 4) barW = 4;
+
+    unsigned long maxSec = 3600;
+    for (int i = 0; i < dayCount; i++) {
+        if (days[i].utilitySec > maxSec) maxSec = days[i].utilitySec;
+        if (days[i].generatorSec > maxSec) maxSec = days[i].generatorSec;
+    }
+
+    String svg = "<svg viewBox='0 0 " + String(w) + " " + String(h) + "' style='width:100%;height:auto'>";
+    svg += "<line x1='" + String(padLeft) + "' y1='" + String(h - padBottom) + "' x2='" + String(w - padRight) + "' y2='" + String(h - padBottom) + "' stroke='#30363d'/>";
+
+    for (int i = 0; i < dayCount; i++) {
+        int gx = padLeft + i * barGroupW + barGroupW / 2;
+        int uH = (int)((float)days[i].utilitySec / maxSec * chartH);
+        int gH = (int)((float)days[i].generatorSec / maxSec * chartH);
+        int uX = gx - barW - 2;
+        int gX = gx + 2;
+        int uY = h - padBottom - uH;
+        int gY = h - padBottom - gH;
+        svg += "<rect x='" + String(uX) + "' y='" + String(uY) + "' width='" + String(barW) + "' height='" + String(uH) + "' fill='#10b981' rx='2'/>";
+        svg += "<rect x='" + String(gX) + "' y='" + String(gY) + "' width='" + String(barW) + "' height='" + String(gH) + "' fill='#f59e0b' rx='2'/>";
+
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02d/%02d", days[i].mday, days[i].mon + 1);
+        svg += "<text x='" + String(gx) + "' y='" + String(h - padBottom + 16) + "' font-size='10' fill='#9ca3af' text-anchor='middle'>" + String(buf) + "</text>";
+    }
+    svg += "</svg>";
+    return svg;
+}
+
+String atsGetStateName(ATSState state) {
+    switch (state) {
+        case ATS_UTILITY_POWER: return "UTILITY";
+        case ATS_GENERATOR_POWER: return "GENERATOR";
+        default: return "UNKNOWN";
+    }
+}
+
+String atsGetStateColor(ATSState state) {
+    switch (state) {
+        case ATS_UTILITY_POWER: return "#00ff00";
+        case ATS_GENERATOR_POWER: return "#ff8c00";
+        default: return "#ff0000";
+    }
+}
+
+String formatDuration(unsigned long seconds) {
+    if (seconds < 60) return String(seconds) + "s";
+    if (seconds < 3600) return String(seconds / 60) + "m " + String(seconds % 60) + "s";
+    if (seconds < 86400) return String(seconds / 3600) + "h " + String((seconds % 3600) / 60) + "m";
+    return String(seconds / 86400) + "d " + String((seconds % 86400) / 3600) + "h";
+}
+
+String formatDurationLong(unsigned long seconds) {
+    unsigned long days = seconds / 86400;
+    unsigned long hours = (seconds % 86400) / 3600;
+    unsigned long mins = (seconds % 3600) / 60;
+    unsigned long secs = seconds % 60;
+    
+    String result = "";
+    if (days > 0) { result += String(days) + "d "; }
+    if (hours > 0 || days > 0) { result += String(hours) + "h "; }
+    if (mins > 0 || hours > 0 || days > 0) { result += String(mins) + "m "; }
+    result += String(secs) + "s";
+    return result;
+}
+
+unsigned long atsGetTotalTimeInState(ATSState targetState) {
+    unsigned long total = 0;
+    for (int i = 0; i < historyCount; i++) {
+        if (atsHistory[i].state == targetState) {
+            total += atsHistory[i].duration;
+        }
+    }
+    total += (atsState == targetState) ? atsGetTimeInState() : 0;
+    return total;
+}
+
+float atsGetPercentageInState(ATSState targetState) {
+    unsigned long totalTime = 0;
+    for (int i = 0; i < historyCount; i++) {
+        totalTime += atsHistory[i].duration;
+    }
+    totalTime += atsGetTimeInState();
+    if (totalTime == 0) return 0;
+    return (float)atsGetTotalTimeInState(targetState) * 100.0 / totalTime;
+}
+
+int atsGetStateChangesCount(ATSState targetState) {
+    int count = 0;
+    for (int i = 0; i < historyCount; i++) {
+        if (atsHistory[i].state == targetState) count++;
+    }
+    return count;
+}
+
+unsigned long atsGetAverageDuration(ATSState targetState) {
+    int count = atsGetStateChangesCount(targetState);
+    if (count == 0) return 0;
+    return atsGetTotalTimeInState(targetState) / count;
+}
+
+unsigned long atsGetMaxDuration(ATSState targetState) {
+    unsigned long maxDur = 0;
+    for (int i = 0; i < historyCount; i++) {
+        if (atsHistory[i].state == targetState && atsHistory[i].duration > maxDur) {
+            maxDur = atsHistory[i].duration;
+        }
+    }
+    unsigned long current = (atsState == targetState) ? atsGetTimeInState() : 0;
+    if (current > maxDur) maxDur = current;
+    return maxDur;
+}
+
+unsigned long atsGetMinDuration(ATSState targetState) {
+    unsigned long minDur = 0xFFFFFFFF;
+    bool found = false;
+    for (int i = 0; i < historyCount; i++) {
+        if (atsHistory[i].state == targetState) {
+            found = true;
+            if (atsHistory[i].duration < minDur) minDur = atsHistory[i].duration;
+        }
+    }
+    unsigned long current = (atsState == targetState) ? atsGetTimeInState() : 0;
+    if (current > 0 && current < minDur) minDur = current;
+    if (!found && current == 0) return 0;
+    return minDur;
+}
+
+// ============================================
+// PZEM
+// ============================================
+bool pzemBegin() {
+    Serial2.begin(PZEM_BAUD_RATE, SERIAL_8N1, PZEM_RX_PIN, PZEM_TX_PIN);
+    delay(100);
+    float voltage = pzem.voltage();
+    if (!isnan(voltage)) {
+        pzemInitialized = true;
+        Serial.println("PZEM-004T initialized");
+        return true;
+    }
+    Serial.println("PZEM-004T init failed");
+    return false;
+}
+
+// Lectura "rapida" para el JSON API: devuelve los ultimos valores cacheados en
+// pzemData (siempre que sean validos). El PZEM real corre en su propia tarea
+// (ver pzemTaskBegin / pzemTaskEntry abajo) para no bloquear ni la pantalla ni
+// el servidor web. Esta funcion existe para mantener el resto del codigo que
+// la llamaba sin cambios.
+// Lectura "fresca" usada SOLO desde la tarea dedicada al PZEM. Hace las 6
+// transacciones Modbus una tras otra. Cada una tarda ~300ms en baudrate 9600
+// (timeout del PZEM004Tv30); en total bloquea 1.5-2s. Por eso vive en su
+// propia tarea: mientras tanto, el nucleo principal (pantalla + web) corre
+// sin ser interrumpido. Devuelve true si todas las lecturas principales son
+// validas (no NaN). Tambien cachea el timestamp en pzemData.lastRead.
+static bool pzemReadBlocking() {
+    float voltage = pzem.voltage();
+    float current = pzem.current();
+    float power   = pzem.power();
+    float energy  = pzem.energy();
+    float frequency = pzem.frequency();
+    float pf      = pzem.pf();
+
+    if (!isnan(voltage) && !isnan(current) && !isnan(power)) {
+        pzemData.voltage   = voltage;
+        pzemData.current   = current;
+        pzemData.power     = power;
+        pzemData.energy    = energy;
+        pzemData.frequency = frequency;
+        pzemData.pf        = pf;
+        pzemData.isValid   = true;
+        pzemData.lastRead  = millis();
+        return true;
+    }
+    pzemData.isValid = false;
+    return false;
+}
+
+// Tarea FreeRTOS dedicada al PZEM, corre en Core 0 para no molestar al
+// nucleo principal (Core 1, donde estan TFT y WebServer). Duerme en bloque
+// usando vTaskDelay entre lecturas para no quemar CPU.
+static void pzemTaskEntry(void* arg) {
+    unsigned long lastRead = 0;
+    for (;;) {
+        unsigned long now = millis();
+        if (pzemInitialized && (now - lastRead) >= PZEM_READ_INTERVAL) {
+            lastRead = now;
+            bool ok = pzemReadBlocking();
+            // Guardamos el estado para que el JSON API y la UI lo lean
+            // sin tener que tocar Serial2 ellos mismos.
+            if (ok) {
+                pzemStatusStr = "PZEM: OK";
+            } else {
+                pzemStatusStr = "PZEM: ERR";
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static TaskHandle_t pzemTaskHandle = NULL;
+void pzemTaskBegin() {
+    if (pzemTaskHandle != NULL) return;
+    xTaskCreatePinnedToCore(
+        pzemTaskEntry,
+        "pzem",
+        4096,           // stack suficiente para Modbus + lib PZEM
+        NULL,
+        1,              // prioridad baja: no debe competir con el nucleo principal
+        &pzemTaskHandle,
+        0               // Core 0
+    );
+}
+
+String pzemGetStatusString() {
+    if (!pzemInitialized) return "PZEM: Not Connected";
+    if (!pzemData.isValid) return "PZEM: No Data";
+    return "PZEM: OK";
+}
+
+// ============================================
+// DISPLAY - TEMA 6: TESLA / APP MODERNA
+// Optimizado para CYD ESP32-2432S028 (320x240)
+// ============================================
+
+const uint16_t UI_BG       = 0x10A2; // #121212 aprox.
+const uint16_t UI_PANEL    = 0x2104; // #202020 aprox.
+const uint16_t UI_PANEL2   = 0x2945; // #282828 aprox.
+const uint16_t UI_BLUE     = 0x3B8F; // azul brillante
+const uint16_t UI_BLUE2    = 0x1C9F; // azul secundario
+const uint16_t UI_GREEN    = 0x07E0;
+const uint16_t UI_ORANGE   = 0xFD20;
+const uint16_t UI_RED      = 0xF800;
+const uint16_t UI_WHITE    = 0xFFFF;
+const uint16_t UI_GRAY     = 0x8410;
+const uint16_t UI_MUTED    = 0x5AEB;
+const uint16_t UI_LINE     = 0x39C7;
+
+static bool uiStaticDrawn = false;
+static bool themeStaticDrawn = false;
+static bool uiDeviceListTitleDrawn = false;
+static String uiDeviceListLastSignature = "\x01";
+static int uiLastAts = -1;
+static bool uiLastPzemValid = false;
+static String uiLastPower = "";
+static String uiLastVoltage = "";
+static String uiLastCurrent = "";
+static String uiLastPF = "";
+static String uiLastFreq = "";
+static String uiLastEnergy = "";
+static String uiLastUptime = "";
+static String uiLastWifi = "";
+static String uiLastIp = "";
+static String uiLastDeviceSignature = "";
+
+void uiResetDrawState() {
+    uiStaticDrawn = false;
+    themeStaticDrawn = false;
+    uiDeviceListTitleDrawn = false;
+    uiDeviceListLastSignature = "\x01";
+    uiLastAts = -1;
+    uiLastPzemValid = false;
+    uiLastPower = "";
+    uiLastVoltage = "";
+    uiLastCurrent = "";
+    uiLastPF = "";
+    uiLastFreq = "";
+    uiLastEnergy = "";
+    uiLastUptime = "";
+    uiLastWifi = "";
+    uiLastIp = "";
+    uiLastDeviceSignature = "";
+}
+
+void uiText(int x, int y, const String& text, uint16_t color, uint8_t size = 1) {
+    tft.setTextSize(size);
+    tft.setTextColor(color, UI_PANEL);
+    tft.setCursor(x, y);
+    tft.print(text);
+}
+
+void uiClearValue(int x, int y, int w, int h, uint16_t bg = UI_PANEL) {
+    tft.fillRect(x, y, w, h, bg);
+}
+
+void displayBegin() {
+    tft.init();
+    tft.setRotation(DISPLAY_ORIENTATION);
+
+    // Fix gamma issue for CYD2USB (ILI9341_GAMMASET = 0x26)
+    tft.writecommand(0x26);
+    tft.writedata(2);
+    delay(120);
+    tft.writecommand(0x26);
+    tft.writedata(1);
+
+    tft.fillScreen(UI_BG);
+    tft.setTextFont(2);
+    displayInitialized = true;
+    uiResetDrawState();
+    Serial.println("Display initialized - Tesla/App UI");
+}
+
+void displayDrawHeader() {
+    // Cabecera: logo + estado WiFi + hora.
+    tft.fillRect(0, 0, DISPLAY_WIDTH, 34, UI_PANEL);
+    tft.drawFastHLine(0, 33, DISPLAY_WIDTH, UI_LINE);
+
+    tft.setTextSize(2);
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.setCursor(8, 7);
+    tft.print("CYD");
+    tft.setTextColor(UI_BLUE, UI_PANEL);
+    tft.print(" Power");
+
+    bool wifiOk = (WiFi.status() == WL_CONNECTED);
+    tft.fillCircle(257, 12, 5, wifiOk ? UI_GREEN : UI_RED);
+    tft.setTextSize(1);
+    tft.setTextColor(wifiOk ? UI_GREEN : UI_RED, UI_PANEL);
+    tft.setCursor(267, 8);
+    tft.print(wifiOk ? "ONLINE" : "OFFLINE");
+
+    time_t nowEpoch = time(nullptr);
+    char timeBuf[8] = "--:--";
+    if (nowEpoch > 100000) {
+        struct tm ti;
+        localtime_r(&nowEpoch, &ti);
+        strftime(timeBuf, sizeof(timeBuf), "%H:%M", &ti);
+    }
+    tft.setTextColor(UI_MUTED, UI_PANEL);
+    tft.setCursor(268, 20);
+    tft.print(timeBuf);
+}
+
+void displayDrawSourceCard() {
+    // Panel principal: solo POTENCIA (W), VOLTAJE (V) y CORRIENTE (A).
+    const int x = 6, y = 38, w = 308, h = 69;
+
+    if (!uiStaticDrawn) {
+        tft.fillRoundRect(x, y, w, h, 8, UI_PANEL);
+        tft.drawRoundRect(x, y, w, h, 8, UI_LINE);
+    }
+
+    bool valid = pzemData.isValid;
+    uint16_t sourceColor = themeSourceColor();
+    String source = themeSourceName();
+
+    static String lastSource = "";
+    if (source != lastSource) {
+        tft.fillRoundRect(x + 10, y + 8, 116, 17, 8, sourceColor);
+        tft.setTextSize(1);
+        tft.setTextColor(UI_WHITE, sourceColor);
+        tft.setCursor(x + 17, y + 13);
+        tft.print(source);
+        lastSource = source;
+    }
+
+    String power = valid ? String((int)round(pzemData.power)) : "--";
+    if (power != uiLastPower) {
+        uiClearValue(x + 136, y + 4, 105, 34, UI_PANEL);
+        tft.setTextSize(3);
+        tft.setTextColor(UI_WHITE, UI_PANEL);
+        tft.setCursor(x + 136, y + 4);
+        tft.print(power);
+        tft.setTextSize(1);
+        tft.setTextColor(UI_WHITE, UI_PANEL);
+        tft.setCursor(x + 244, y + 18);
+        tft.print("W");
+        uiLastPower = power;
+    }
+
+    String v = valid ? String(pzemData.voltage, 1) + " V" : "-- V";
+    String a = valid ? String(pzemData.current, 2) + " A" : "-- A";
+
+    if (v != uiLastVoltage) {
+        uiClearValue(x + 12, y + 42, 105, 18, UI_PANEL);
+        uiText(x + 12, y + 44, v, 0x07FF, 1);
+        uiLastVoltage = v;
+    }
+    if (a != uiLastCurrent) {
+        uiClearValue(x + 120, y + 42, 105, 18, UI_PANEL);
+        uiText(x + 120, y + 44, a, 0xFFE0, 1);
+        uiLastCurrent = a;
+    }
+}
+
+void displayDrawMetricCards() {
+    // No mostramos PF, frecuencia ni energia en la pantalla principal.
+    // Esta zona queda como estado rapido del sistema.
+    const int y = 112;
+
+    static String lastPzemState = "";
+    static String lastWifiState = "";
+    static String lastSourceState = "";
+
+    String ps = pzemData.isValid ? "PZEM ONLINE" : "PZEM SIN DATOS";
+    String ws = WiFi.status() == WL_CONNECTED ? "WIFI OK" : "WIFI OFF";
+    String ss = themeSourceName();
+
+    if (!uiStaticDrawn) {
+        tft.fillRoundRect(6, y, 308, 35, 7, UI_PANEL);
+        tft.drawRoundRect(6, y, 308, 35, 7, UI_LINE);
+    }
+
+    if (ps != lastPzemState) {
+        tft.fillRect(12, y + 4, 190, 14, UI_PANEL);
+        tft.setTextSize(1);
+        tft.setTextColor(pzemData.isValid ? UI_GREEN : UI_RED, UI_PANEL);
+        tft.setCursor(14, y + 7);
+        tft.print(ps);
+        lastPzemState = ps;
+    }
+
+    if (ws != lastWifiState) {
+        tft.fillRect(207, y + 4, 96, 14, UI_PANEL);
+        tft.setTextSize(1);
+        tft.setTextColor(WiFi.status() == WL_CONNECTED ? 0x07FF : UI_RED, UI_PANEL);
+        tft.setCursor(211, y + 7);
+        tft.print(ws);
+        lastWifiState = ws;
+    }
+
+    if (ss != lastSourceState) {
+        tft.fillRect(12, y + 19, 291, 13, UI_PANEL);
+        tft.setTextSize(1);
+        tft.setTextColor(themeSourceColor(), UI_PANEL);
+        tft.setCursor(14, y + 21);
+        tft.print("FUENTE: ");
+        tft.print(ss);
+        lastSourceState = ss;
+    }
+}
+
+void displayDrawFooter() {
+    // Uptime e IP en una franja discreta.
+    const int y = 226;
+    tft.fillRect(0, y, DISPLAY_WIDTH, 14, UI_BG);
+
+    String uptime = formatDurationLong(millis() / 1000);
+    String ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "sin WiFi";
+
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setCursor(7, y + 4);
+    tft.print("UP ");
+    tft.print(uptime);
+
+    tft.setCursor(190, y + 4);
+    tft.print(ip);
+
+    uiLastUptime = uptime;
+    uiLastIp = ip;
+}
+
+void displayDrawDeviceList();
+
+void displayRenderCurrentTheme() {
+    if (!displayInitialized) return;
+
+    // Si el usuario cambio de tema, reconstruimos toda la pantalla.
+    if (previousTheme != currentTheme) {
+        previousTheme = currentTheme;
+        uiResetDrawState();
+        tft.fillScreen(UI_BG);
+    }
+
+    switch (currentTheme) {
+        case THEME_SCADA:
+            themeDrawSCADA();
+            break;
+        case THEME_MINIMAL:
+            themeDrawMinimal();
+            break;
+        case THEME_CYBERPUNK:
+            themeDrawCyberpunk();
+            break;
+        case THEME_RETRO:
+            themeDrawRetro();
+            break;
+        case THEME_GLASS:
+            themeDrawGlass();
+            break;
+        case THEME_TESLA:
+        default:
+            // Tesla mantiene el motor incremental/flicker-free original.
+            displayDrawHeader();
+            displayDrawSourceCard();
+            displayDrawMetricCards();
+            displayDrawFooter();
+            displayDrawDeviceList();
+            uiStaticDrawn = true;
+            break;
+    }
+}
+
+void displayUpdate() {
+    if (!displayInitialized) return;
+
+    unsigned long now = millis();
+    if (now - displayLastUpdate < DISPLAY_UPDATE_INTERVAL) return;
+    displayLastUpdate = now;
+
+    displayRenderCurrentTheme();
+}
+void displayShowMessage(const String& message, int duration) {
+    if (!displayInitialized) return;
+
+    tft.fillScreen(UI_BG);
+    tft.setTextColor(UI_WHITE, UI_BG);
+    tft.setTextSize(2);
+    tft.setTextWrap(true);
+    tft.setCursor(10, DISPLAY_HEIGHT / 2 - 20);
+    tft.print(message);
+    delay(duration);
+
+    // Obliga a reconstruir toda la interfaz al volver al dashboard.
+    uiResetDrawState();
+}
+
+void displayWiFiPortalInfo() {
+    if (!displayInitialized) return;
+
+    tft.fillScreen(UI_BG);
+    tft.setTextColor(UI_BLUE, UI_BG);
+    tft.setTextSize(2);
+    tft.setCursor(10, 10);
+    tft.print("WiFi Setup");
+
+    tft.drawFastHLine(10, 34, DISPLAY_WIDTH - 20, UI_LINE);
+
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setTextSize(1);
+    tft.setCursor(10, 46);
+    tft.print("Conectate a la red:");
+
+    tft.setTextColor(UI_WHITE, UI_BG);
+    tft.setTextSize(2);
+    tft.setCursor(10, 62);
+    tft.print("CYD-Monitor-");
+    tft.print(WiFi.macAddress().substring(15));
+
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setTextSize(1);
+    tft.setCursor(10, 94);
+    tft.print("Luego abre en el navegador:");
+
+    tft.setTextColor(UI_GREEN, UI_BG);
+    tft.setTextSize(2);
+    tft.setCursor(10, 108);
+    tft.print("192.168.4.1");
+
+    tft.setTextColor(UI_WHITE, UI_BG);
+    tft.setTextSize(1);
+    tft.setCursor(10, 142);
+    tft.print("Configura la red WiFi desde");
+    tft.setCursor(10, 156);
+    tft.print("el portal de configuracion.");
+
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setCursor(10, 190);
+    tft.print("CYD Power Monitor v");
+    tft.print(FIRMWARE_VERSION);
+}
+
+// ============================================
+// WEB SERVER - Professional Industrial Dashboard
+// ============================================
+String getMainPage() {
+    String page;
+    page.reserve(24000);
+
+    page = F(R"rawliteral(<!DOCTYPE html>
+<html lang='es'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>
+<meta name='theme-color' content='#07111f'>
+<title>CYD Power Monitor V4</title>
+<style>
+:root{--bg:#06101c;--panel:#0b1727;--panel2:#0e1d30;--line:#1b3048;--text:#eaf2fb;--muted:#8193a8;--cyan:#22d3ee;--green:#22c55e;--orange:#f59e0b;--red:#ef4444;--blue:#60a5fa;--purple:#a78bfa;--shadow:0 12px 34px rgba(0,0,0,.24)}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 15% 0,#0d2036 0,#06101c 35%,#040b13 100%);color:var(--text);font-family:Inter,Segoe UI,system-ui,-apple-system,sans-serif;line-height:1.45}
+.top{position:sticky;top:0;z-index:20;background:rgba(5,13,23,.88);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.topin{max-width:1450px;margin:auto;padding:12px 18px;display:flex;align-items:center;gap:18px;justify-content:space-between}.brand{display:flex;align-items:center;gap:11px;min-width:0}.logo{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(135deg,#22d3ee,#3b82f6);color:#02111c;font-weight:900;box-shadow:0 0 28px rgba(34,211,238,.2)}.brand h1{font-size:1.02rem;margin:0;white-space:nowrap}.brand small{display:block;color:var(--muted);font-size:.68rem;margin-top:2px}.nav{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.nav a{color:var(--muted);text-decoration:none;border:1px solid transparent;border-radius:9px;padding:8px 11px;font-size:.78rem}.nav a:hover{color:var(--text);border-color:var(--line);background:#0c1b2c}.nav .active{color:var(--cyan);border-color:rgba(34,211,238,.24);background:rgba(34,211,238,.08)}
+.wrap{max-width:1450px;margin:auto;padding:18px}.hero{display:grid;grid-template-columns:1.6fr .7fr;gap:14px;margin-bottom:14px}.heroCard,.card{background:linear-gradient(145deg,rgba(14,29,48,.96),rgba(7,17,29,.96));border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}.heroCard{padding:22px}.eyebrow{color:var(--cyan);font-size:.68rem;letter-spacing:1.8px;text-transform:uppercase;font-weight:800}.power{font-size:clamp(2.5rem,6vw,4.8rem);font-weight:800;letter-spacing:-3px;margin:3px 0}.power span{font-size:.34em;color:var(--muted);letter-spacing:0}.source{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;font-size:.75rem;font-weight:700;background:#10233a}.dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.source.utility{color:var(--green)}.source.generator{color:var(--orange)}.source.unknown{color:var(--red)}
+.sync{padding:18px;display:flex;flex-direction:column;justify-content:center;gap:10px}.syncLine{display:flex;justify-content:space-between;gap:10px;font-size:.75rem}.muted{color:var(--muted)}.live{color:var(--green);font-weight:800}.live.ws{color:var(--cyan)}
+.grid{display:grid;gap:14px}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.card{padding:16px}.title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px}.title h2{font-size:.9rem;margin:0}.title .tag{font-size:.65rem;color:var(--muted);border:1px solid var(--line);padding:4px 7px;border-radius:7px}.metric{padding:14px;border:1px solid var(--line);border-radius:12px;background:rgba(5,14,25,.55);min-width:0}.metric .k{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px}.metric .v{font-size:1.45rem;font-weight:750;margin-top:4px}.metric .u{font-size:.65em;color:var(--muted);font-weight:500}.cyan{color:var(--cyan)}.green{color:var(--green)}.orange{color:var(--orange)}.purple{color:var(--purple)}.red{color:var(--red)}
+.ats{display:flex;align-items:center;justify-content:space-between;gap:18px}.atsState{font-size:1.25rem;font-weight:800}.atsState.utility{color:var(--green)}.atsState.generator{color:var(--orange)}.atsState.unknown{color:var(--red)}.bar{height:12px;border-radius:999px;background:#06101c;border:1px solid var(--line);overflow:hidden;display:flex}.bar i{display:block;height:100%;transition:width .35s ease}.bar .u{background:var(--green)}.bar .g{background:var(--orange)}
+.devices{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.device{border:1px solid var(--line);border-radius:12px;padding:12px;background:rgba(4,12,21,.62)}.deviceHead{display:flex;justify-content:space-between;gap:8px;align-items:center}.deviceName{font-weight:700;font-size:.84rem}.state{font-size:.63rem;font-weight:800;padding:4px 7px;border-radius:7px}.state.on{color:var(--green);background:rgba(34,197,94,.1)}.state.off{color:var(--red);background:rgba(239,68,68,.1)}.dmetrics{display:flex;gap:14px;margin-top:10px;color:var(--muted);font-size:.68rem}.dmetrics b{color:var(--text);font-weight:700}.empty{color:var(--muted);font-size:.78rem;padding:10px 0}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;color:var(--text);background:#102239;border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:.75rem}.btn:hover{border-color:#2e587d}.btn.primary{background:rgba(34,211,238,.1);border-color:rgba(34,211,238,.3);color:var(--cyan)}
+.footer{text-align:center;color:var(--muted);font-size:.68rem;padding:24px 0 8px}.pulse{animation:p 1.5s infinite}@keyframes p{50%{opacity:.45}}
+@media(max-width:1000px){.g4{grid-template-columns:repeat(2,1fr)}.hero{grid-template-columns:1fr}.nav{justify-content:flex-start}}@media(max-width:620px){.topin{align-items:flex-start;flex-direction:column}.nav{width:100%;overflow:auto;flex-wrap:nowrap}.nav a{white-space:nowrap}.wrap{padding:10px}.g4,.g2,.g3{grid-template-columns:1fr}.heroCard{padding:16px}.power{font-size:3.3rem}.ats{align-items:flex-start;flex-direction:column}}
+</style></head>
+<body>
+<div class='top'><div class='topin'><div class='brand'><div class='logo'>⚡</div><div><h1>CYD Power Monitor</h1><small>V4 · Live Energy Control</small></div></div><div class='nav'><a class='active' href='/'>Dashboard</a><a href='/history'>Histórico ATS</a><a href='/devices'>Dispositivos</a><a href='/theme'>Temas</a><a href='/ota'>OTA</a></div></div></div>
+<main class='wrap'>
+<section class='hero'><div class='heroCard'><div class='eyebrow'>Potencia activa · PZEM-004T</div><div class='power'><span id='power'>--</span> <span>W</span></div><div id='source' class='source unknown'><i class='dot'></i><span id='sourceText'>DESCONOCIDO</span></div></div><div class='heroCard sync'><div class='syncLine'><span class='muted'>Conexión</span><strong id='conn'>ONLINE</strong></div><div class='syncLine'><span class='muted'>Canal de datos</span><strong id='channel' class='live'>HTTP LIVE</strong></div><div class='syncLine'><span class='muted'>Latencia UI</span><strong id='latency'>-- ms</strong></div><div class='syncLine'><span class='muted'>IP</span><strong id='ip'>--</strong></div></div></section>
+<section class='grid g4' style='margin-bottom:14px'><div class='metric'><div class='k'>Voltaje</div><div class='v cyan'><span id='volt'>--</span><span class='u'> V</span></div></div><div class='metric'><div class='k'>Corriente</div><div class='v cyan'><span id='curr'>--</span><span class='u'> A</span></div></div><div class='metric'><div class='k'>Factor de potencia</div><div class='v'><span id='pf'>--</span></div></div><div class='metric'><div class='k'>Frecuencia</div><div class='v cyan'><span id='freq'>--</span><span class='u'> Hz</span></div></div></section>
+<section class='grid g2' style='margin-bottom:14px'><div class='card'><div class='title'><h2>⚡ Energía instantánea</h2><span class='tag'>PZEM</span></div><div class='grid g3'><div class='metric'><div class='k'>Aparente</div><div class='v'><span id='app'>--</span><span class='u'> VA</span></div></div><div class='metric'><div class='k'>Reactiva</div><div class='v orange'><span id='react'>--</span><span class='u'> VAR</span></div></div><div class='metric'><div class='k'>Acumulada</div><div class='v green'><span id='energy'>--</span><span class='u'> Wh</span></div></div></div></div>
+<div class='card'><div class='title'><h2>🔄 ATS</h2><span class='tag' id='changes'>0 cambios</span></div><div class='ats'><div><div id='atsState' class='atsState unknown'>DESCONOCIDO</div><div class='muted' style='font-size:.72rem;margin-top:4px'>Tiempo en estado: <b id='atsTime'>--</b></div></div><div style='min-width:190px;width:42%'><div class='syncLine'><span class='muted'>Red</span><b class='green' id='upct'>0%</b></div><div class='syncLine'><span class='muted'>Generador</span><b class='orange' id='gpct'>0%</b></div><div class='bar' style='margin-top:7px'><i id='barU' class='u' style='width:0%'></i><i id='barG' class='g' style='width:0%'></i></div></div></div></div></section>
+<section class='card' style='margin-bottom:14px'><div class='title'><h2>📡 Dispositivos conectados</h2><span class='tag' id='deviceCount'>0</span></div><div id='devices' class='devices'><div class='empty'>Cargando dispositivos...</div></div><div class='actions' style='margin-top:12px'><a class='btn primary' href='/devices'>Administrar dispositivos</a></div></section>
+<section class='grid g3'><div class='metric'><div class='k'>WiFi RSSI</div><div class='v cyan'><span id='rssi'>--</span><span class='u'> dBm</span></div></div><div class='metric'><div class='k'>Uptime</div><div class='v'><span id='uptime'>--</span></div></div><div class='metric'><div class='k'>Memoria libre</div><div class='v'><span id='heap'>--</span><span class='u'> KB</span></div></div></section>
+<div class='footer'>CYD Power Monitor <span id='version'>V4.0.0</span> · última actualización <span id='last'>--:--:--</span></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);let lastPacket=performance.now(),ws=null,wsOk=false,pollTimer=null;
+const fmt=(s)=>{s=Math.max(0,Math.round(s||0));let d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60,r='';if(d)r+=d+'d ';if(h||d)r+=h+'h ';if(m||h||d)r+=m+'m ';return r+x+'s'}
+const put=(id,v)=>{let e=$(id);if(e)e.textContent=v}
+const render=(d)=>{let t=performance.now();put('latency',Math.round(t-lastPacket)+' ms');lastPacket=t;let p=d.pzem||{},a=d.ats||{},s=d.system||{};put('power',p.valid?(+p.power).toFixed(1):'--');put('volt',p.valid?(+p.voltage).toFixed(1):'--');put('curr',p.valid?(+p.current).toFixed(2):'--');put('pf',p.valid?(+p.pf).toFixed(2):'--');put('freq',p.valid?(+p.frequency).toFixed(1):'--');let ap=p.pf>0?p.power/p.pf:0,rp=Math.sqrt(Math.max(0,ap*ap-p.power*p.power));put('app',p.valid?ap.toFixed(1):'--');put('react',p.valid?rp.toFixed(1):'--');put('energy',p.valid?(+p.energy).toFixed(1):'--');put('rssi',s.rssi);put('ip',s.ip||'--');put('uptime',fmt(s.uptime));put('heap',Math.round((s.freeHeap||0)/1024));put('version',s.version||'V4');put('changes',(a.changes||0)+' cambios');put('atsTime',fmt(a.timeInState));put('upct',(+(a.utilPct||0)).toFixed(1)+'%');put('gpct',(+(a.genPct||0)).toFixed(1)+'%');$('barU').style.width=(+a.utilPct||0)+'%';$('barG').style.width=(+a.genPct||0)+'%';let st=$('atsState'),src=$('source'),txt=a.state==='UTILITY'?'RED ELÉCTRICA':a.state==='GENERATOR'?'GENERADOR':'DESCONOCIDO';st.textContent=txt;st.className='atsState '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');src.className='source '+(a.state==='UTILITY'?'utility':a.state==='GENERATOR'?'generator':'unknown');put('sourceText',txt);put('last',new Date().toLocaleTimeString());$('conn').textContent='ONLINE'}
+const renderDevices=(list)=>{let box=$('devices');if(!Array.isArray(list)||!list.length){box.innerHTML='<div class="empty">No hay dispositivos configurados.</div>';put('deviceCount','0');return}put('deviceCount',list.length+' dispositivos');box.innerHTML=list.map(d=>{let on=!!d.state;let energy=d.hasEnergyMonitoring&&d.metricsValid?`<div class="dmetrics"><span><b>${(+d.power).toFixed(0)}</b> W</span><span><b>${(+d.voltage).toFixed(0)}</b> V</span><span><b>${(+d.current).toFixed(2)}</b> A</span></div>`:'<div class="dmetrics"><span>Control ON/OFF</span></div>';return `<div class="device"><div class="deviceHead"><div class="deviceName">${escapeHtml(d.name||'Dispositivo')}</div><span class="state ${on?'on':'off'}">${on?'ON':'OFF'}</span></div>${energy}</div>`}).join('')}
+const escapeHtml=(s)=>{return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+const fetchData=async()=>{try{let r=await fetch('/api/data',{cache:'no-store'});if(!r.ok)throw 0;render(await r.json())}catch(e){$('conn').textContent='SIN RESPUESTA'}}
+const fetchDevices=async()=>{try{let r=await fetch('/api/devices',{cache:'no-store'});if(r.ok)renderDevices(await r.json())}catch(e){}}
+const startFallback=()=>{if(pollTimer)return;put('channel','HTTP LIVE');pollTimer=setInterval(()=>{fetchData();fetchDevices()},1000);fetchData();fetchDevices()}
+const connectWS=()=>{
+  if(!('WebSocket' in window)){startFallback();return}
+  try{ws=new WebSocket('ws://'+location.hostname+':81/')}catch(e){startFallback();return}
+  ws.onopen=()=>{wsOk=true;put('channel','WEBSOCKET LIVE');$('channel').className='live ws';fetchDevices()}
+  ws.onmessage=e=>{try{render(JSON.parse(e.data))}catch(x){}}
+  ws.onclose=()=>{wsOk=false;$('channel').className='live';startFallback();setTimeout(connectWS,3000)}
+  ws.onerror=()=>{try{ws.close()}catch(e){}}
+}
+connectWS();
+</script></body></html>)rawliteral");
+    return page;
+}
+
+String getHistoryPage(String filter) {
+    String page;
+    page.reserve(25000);
+    
+    unsigned long ut = atsGetTotalTimeInState(ATS_UTILITY_POWER);
+    unsigned long gt = atsGetTotalTimeInState(ATS_GENERATOR_POWER);
+    unsigned long tt = ut + gt;
+    float up = tt > 0 ? (float)ut * 100 / tt : 0;
+    float gp = tt > 0 ? (float)gt * 100 / tt : 0;
+    
+    int maxEntries = 50;
+    if (filter == "week") maxEntries = 100;
+    else if (filter == "month") maxEntries = 100;
+    else if (filter == "year") maxEntries = 100;
+    
+    page = F(R"rawliteral(<!DOCTYPE html>
+<html lang='es'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<meta http-equiv='refresh' content='30'>
+<title>Histórico ATS - CYD Power Monitor</title>
+<style>
+:root{--bg:#0a0e17;--card:#111827;--border:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--accent:#00d4ff;--accent2:#3b82f6;--green:#10b981;--orange:#f59e0b;--red:#ef4444;--purple:#8b5cf6;--yellow:#eab308}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+.topbar{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);padding:0;border-bottom:2px solid var(--accent);position:sticky;top:0;z-index:100}
+.topbar-inner{max-width:1400px;margin:0 auto;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.2em;font-weight:bold;color:#000}
+.logo-text h1{color:var(--accent);font-size:1.3em;letter-spacing:-0.5px}
+.logo-text span{color:var(--muted);font-size:0.75em}
+.nav{display:flex;gap:6px;flex-wrap:wrap}
+.nav a{color:var(--muted);text-decoration:none;padding:8px 16px;border-radius:6px;font-size:0.85em;font-weight:500;transition:all 0.2s;border:1px solid transparent}
+.nav a:hover,.nav a.active{color:var(--accent);background:rgba(0,212,255,0.1);border-color:rgba(0,212,255,0.2)}
+.container{max-width:1400px;margin:0 auto;padding:20px}
+.grid{display:grid;gap:16px}
+.grid-4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.grid-2{grid-template-columns:repeat(auto-fit,minmax(400px,1fr))}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.card-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.card-header h2{font-size:0.95em;color:var(--accent);display:flex;align-items:center;gap:8px;font-weight:600}
+.card-header h2::before{content:'';width:3px;height:16px;background:var(--accent);border-radius:2px}
+.card-body{padding:18px}
+.filters{display:flex;gap:8px;flex-wrap:wrap}
+.filter-btn{padding:8px 16px;background:#0f172a;border:1px solid var(--border);border-radius:8px;color:var(--muted);text-decoration:none;font-size:0.85em;font-weight:500;transition:all 0.2s}
+.filter-btn:hover,.filter-btn.active{background:var(--accent);color:#000;border-color:var(--accent)}
+.stat-card{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border:1px solid var(--border);border-radius:10px;padding:18px;text-align:center;transition:transform 0.2s}
+.stat-card:hover{transform:translateY(-2px);border-color:var(--accent)}
+.stat-card .icon{font-size:1.8em;margin-bottom:8px}
+.stat-card .label{color:var(--muted);font-size:0.7em;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.stat-card .value{font-size:1.5em;font-weight:700;margin-bottom:4px}
+.stat-card .sub{color:var(--muted);font-size:0.75em}
+.stat-card.green .value{color:var(--green)}
+.stat-card.orange .value{color:var(--orange)}
+.stat-card.purple .value{color:var(--purple)}
+.stat-card.accent .value{color:var(--accent)}
+.stat-card.yellow .value{color:var(--yellow)}
+.chart-container{background:#0f172a;border-radius:10px;padding:16px;margin-bottom:16px;text-align:center}
+.chart-title{color:var(--muted);font-size:0.8em;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+.donut-wrapper{position:relative;width:120px;height:120px;margin:0 auto}
+.donut-chart{width:120px;height:120px;border-radius:50%;background:conic-gradient(var(--green) )rawliteral");
+    page += String(up, 1);
+    page += F(R"rawliteral(%%, var(--orange) 0 100%)}
+.donut-hole{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:80px;height:80px;background:var(--card);border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.donut-label-pct{font-size:1.1em;font-weight:700;color:var(--accent)}
+.donut-label-txt{font-size:0.6em;color:var(--muted)}
+.timeline{position:relative;padding-left:24px}
+.timeline::before{content:'';position:absolute;left:8px;top:0;bottom:0;width:2px;background:linear-gradient(to bottom,var(--green),var(--orange))}
+.timeline-item{position:relative;margin-bottom:16px;padding:14px;background:#0f172a;border-radius:10px;border:1px solid var(--border);transition:all 0.2s}
+.timeline-item:hover{border-color:var(--accent);transform:translateX(4px)}
+.timeline-item::before{content:'';position:absolute;left:-20px;top:20px;width:10px;height:10px;border-radius:50%;border:2px solid var(--card)}
+.timeline-item.utility::before{background:var(--green);box-shadow:0 0 8px var(--green)}
+.timeline-item.generator::before{background:var(--orange);box-shadow:0 0 8px var(--orange)}
+.timeline-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.timeline-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:0.8em;font-weight:600}
+.timeline-badge.utility{background:rgba(16,185,129,0.15);color:var(--green)}
+.timeline-badge.generator{background:rgba(245,158,11,0.15);color:var(--orange)}
+.timeline-time{color:var(--muted);font-size:0.8em;font-variant-numeric:tabular-nums}
+.timeline-details{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
+.detail-item{display:flex;justify-content:space-between;font-size:0.8em}
+.detail-item .lbl{color:var(--muted)}
+.detail-item .val{color:var(--text);font-weight:600}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:0.85em}
+th{background:#0f172a;color:var(--muted);padding:12px;text-align:left;font-size:0.75em;text-transform:uppercase;letter-spacing:1px;font-weight:600;border-bottom:2px solid var(--border)}
+td{padding:12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(0,212,255,0.03)}
+tr:last-child td{border-bottom:none}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:12px;font-size:0.8em;font-weight:600}
+.badge.utility{background:rgba(16,185,129,0.15);color:var(--green)}
+.badge.generator{background:rgba(245,158,11,0.15);color:var(--orange)}
+.badge.unknown{background:rgba(239,68,68,0.15);color:var(--red)}
+.empty-state{text-align:center;padding:40px;color:var(--muted)}
+.empty-state .icon{font-size:3em;margin-bottom:12px}
+.footer{text-align:center;padding:24px;color:var(--muted);font-size:0.8em;border-top:1px solid var(--border);margin-top:20px}
+@media(max-width:768px){.grid-2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class='topbar'>
+<div class='topbar-inner'>
+<div class='logo'>
+<div class='logo-icon'>📊</div>
+<div class='logo-text'>
+<h1>Histórico ATS</h1>
+<span>Análisis detallado de transferencias</span>
+</div>
+</div>
+<div class='nav'>
+<a href='/'>Dashboard</a>
+<a href='/history' class='active'>Histórico</a>
+<a href='/devices'>Dispositivos</a>
+<a href='/ota'>Actualización</a>
+</div>
+</div>
+</div>
+<div class='container'>
+<div class='grid grid-4'>
+<div class='stat-card green'>
+<div class='icon'>⚡</div>
+<div class='label'>Tiempo Total Red</div>
+<div class='value'>)rawliteral");
+    page += formatDurationLong(ut);
+    page += F(R"rawliteral(</div>
+<div class='sub'>)rawliteral");
+    page += String(up, 1);
+    page += F(R"rawliteral(% del tiempo</div>
+</div>
+<div class='stat-card orange'>
+<div class='icon'>🔌</div>
+<div class='label'>Tiempo Total Generador</div>
+<div class='value'>)rawliteral");
+    page += formatDurationLong(gt);
+    page += F(R"rawliteral(</div>
+<div class='sub'>)rawliteral");
+    page += String(gp, 1);
+    page += F(R"rawliteral(% del tiempo</div>
+</div>
+<div class='stat-card accent'>
+<div class='icon'>🔁</div>
+<div class='label'>Total de Cambios</div>
+<div class='value'>)rawliteral");
+    page += historyCount;
+    page += F(R"rawliteral(</div>
+<div class='sub'>Registros en buffer</div>
+</div>
+<div class='stat-card purple'>
+<div class='icon'>⏱️</div>
+<div class='label'>Tiempo Total Monitoreo</div>
+<div class='value'>)rawliteral");
+    page += formatDurationLong(tt);
+    page += F(R"rawliteral(</div>
+<div class='sub'>Desde el inicio</div>
+</div>
+</div>
+<div class='grid grid-2'>
+<div class='card'>
+<div class='card-header'>
+<h2>📈 Distribución de Uso</h2>
+</div>
+<div class='card-body'>
+<div class='chart-container'>
+<div class='chart-title'>Tiempo en cada fuente de energía</div>
+<div class='donut-wrapper'>
+<div class='donut-chart'></div>
+<div class='donut-hole'>
+<div class='donut-label-pct'>)rawliteral");
+    page += String(up, 1);
+    page += F(R"rawliteral(%</div>
+<div class='donut-label-txt'>Red</div>
+</div>
+</div>
+</div>
+<div style='display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px'>
+<div style='text-align:center;padding:12px;background:rgba(16,185,129,0.1);border-radius:8px;border:1px solid rgba(16,185,129,0.2)'>
+<div style='color:var(--green);font-size:1.5em;font-weight:700'>)rawliteral");
+    page += String(up, 1);
+    page += F(R"rawliteral(%</div>
+<div style='color:var(--muted);font-size:0.8em;margin-top:4px'>Red Eléctrica</div>
+<div style='color:var(--green);font-size:0.9em;margin-top:2px'>)rawliteral");
+    page += formatDurationLong(ut);
+    page += F(R"rawliteral(</div>
+</div>
+<div style='text-align:center;padding:12px;background:rgba(245,158,11,0.1);border-radius:8px;border:1px solid rgba(245,158,11,0.2)'>
+<div style='color:var(--orange);font-size:1.5em;font-weight:700'>)rawliteral");
+    page += String(gp, 1);
+    page += F(R"rawliteral(%</div>
+<div style='color:var(--muted);font-size:0.8em;margin-top:4px'>Generador</div>
+<div style='color:var(--orange);font-size:0.9em;margin-top:2px'>)rawliteral");
+    page += formatDurationLong(gt);
+    page += F(R"rawliteral(</div>
+</div>
+</div>
+</div>
+</div>
+<div class='card'>
+<div class='card-header'>
+<h2>📊 Estadísticas Detalladas</h2>
+</div>
+<div class='card-body'>
+<div style='display:grid;gap:10px'>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Cambios a Red</span>
+<span style='color:var(--green);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += atsGetStateChangesCount(ATS_UTILITY_POWER);
+    page += F(R"rawliteral(</span>
+</div>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Cambios a Generador</span>
+<span style='color:var(--orange);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += atsGetStateChangesCount(ATS_GENERATOR_POWER);
+    page += F(R"rawliteral(</span>
+</div>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Duración Máx. Red</span>
+<span style='color:var(--green);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += formatDurationLong(atsGetMaxDuration(ATS_UTILITY_POWER));
+    page += F(R"rawliteral(</span>
+</div>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Duración Máx. Gen</span>
+<span style='color:var(--orange);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += formatDurationLong(atsGetMaxDuration(ATS_GENERATOR_POWER));
+    page += F(R"rawliteral(</span>
+</div>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Duración Prom. Red</span>
+<span style='color:var(--green);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += formatDurationLong(atsGetAverageDuration(ATS_UTILITY_POWER));
+    page += F(R"rawliteral(</span>
+</div>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Duración Prom. Gen</span>
+<span style='color:var(--orange);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += formatDurationLong(atsGetAverageDuration(ATS_GENERATOR_POWER));
+    page += F(R"rawliteral(</span>
+</div>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Duración Mín. Red</span>
+<span style='color:var(--green);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += formatDurationLong(atsGetMinDuration(ATS_UTILITY_POWER));
+    page += F(R"rawliteral(</span>
+</div>
+<div style='display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px'>
+<span style='color:var(--muted);font-size:0.85em'>Duración Mín. Gen</span>
+<span style='color:var(--orange);font-weight:700;font-size:1.1em'>)rawliteral");
+    page += formatDurationLong(atsGetMinDuration(ATS_GENERATOR_POWER));
+    page += F(R"rawliteral(</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class='card'>
+<div class='card-header'>
+<h2>📈 Tendencia Diaria (Red vs Generador)</h2>
+</div>
+<div class='card-body'>)rawliteral");
+    page += buildDailyTrendChart();
+    page += F(R"rawliteral(
+<div style='display:flex;gap:16px;justify-content:center;margin-top:10px;font-size:0.8em'>
+<span style='color:var(--green)'>■ Red Eléctrica</span>
+<span style='color:var(--orange)'>■ Generador</span>
+</div>
+</div>
+</div>
+<div class='card'>
+<div class='card-header'>
+<h2>🕐 Línea Temporal de Eventos</h2>
+<div class='filters'>)rawliteral");
+    
+    String fNames[] = {"Últimas 24h", "7 Días", "30 Días", "1 Año"};
+    String fVals[] = {"day", "week", "month", "year"};
+    for (int i = 0; i < 4; i++) {
+        page += F("<a href='/history?filter=");
+        page += fVals[i];
+        page += F("' class='filter-btn");
+        if (filter == fVals[i]) page += F(" active");
+        page += F("'>");
+        page += fNames[i];
+        page += F("</a>");
+    }
+    
+    page += F(R"rawliteral(</div>
+</div>
+<div class='card-body'>
+<div class='timeline'>)rawliteral");
+    
+    if (historyCount == 0) {
+        page += F(R"rawliteral(<div class='empty-state'>
+<div class='icon'>📭</div>
+<h3>Sin registros históricos</h3>
+<p>Los eventos de cambio de estado aparecerán aquí automáticamente.</p>
+</div>)rawliteral");
+    } else {
+        int si = historyCount < maxEntries ? 0 : historyCount - maxEntries;
+        int dc = min(historyCount, maxEntries);
+        for (int i = dc - 1; i >= 0; i--) {
+            int idx = (si + i) % MAX_HISTORY_ENTRIES;
+            bool isUtility = (atsHistory[idx].state == ATS_UTILITY_POWER);
+            
+            page += F("<div class='timeline-item ");
+            page += isUtility ? F("utility") : F("generator");
+            page += F("'>");
+            page += F("<div class='timeline-header'>");
+            page += F("<span class='timeline-badge ");
+            page += isUtility ? F("utility'>⚡ RED ELÉCTRICA") : F("generator'>🔌 GENERADOR");
+            page += F("</span>");
+            page += F("<span class='timeline-time'>#");
+            page += (i + 1);
+            page += F(" • ");
+            page += formatRealTimestamp(atsHistory[idx].timestamp);
+            page += F("</span></div>");
+            page += F("<div class='timeline-details'>");
+            page += F("<div class='detail-item'><span class='lbl'>Duración</span><span class='val'>");
+            page += formatDurationLong(atsHistory[idx].duration);
+            page += F("</span></div>");
+            page += F("<div class='detail-item'><span class='lbl'>Registrado en</span><span class='val'>");
+            page += formatRealTimestamp(atsHistory[idx].timestamp);
+            page += F("</span></div>");
+            page += F("<div class='detail-item'><span class='lbl'>Fuente</span><span class='val' style='color:");
+            page += isUtility ? F("var(--green)'>Red Eléctrica") : F("var(--orange)'>Generador");
+            page += F("</span></div>");
+            page += F("</div></div>");
+        }
+    }
+    
+    page += F(R"rawliteral(</div>
+</div>
+</div>
+<div class='card'>
+<div class='card-header' style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
+<h2>📋 Registro Completo</h2>
+<a href='/history.csv' style='background:var(--accent);color:#000;padding:8px 16px;border-radius:6px;font-weight:bold;font-size:0.85em;text-decoration:none'>⬇️ Descargar CSV</a>
+</div>
+<div class='card-body' style='overflow-x:auto'>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Estado</th>
+<th>Duración</th>
+<th>Fecha / Hora</th>
+<th>% del total</th>
+</tr>
+</thead>
+<tbody>)rawliteral");
+    
+    if (historyCount == 0) {
+        page += F("<tr><td colspan='5' style='text-align:center;padding:30px;color:var(--muted)'>No hay registros disponibles</td></tr>");
+    } else {
+        int si = historyCount < maxEntries ? 0 : historyCount - maxEntries;
+        int dc = min(historyCount, maxEntries);
+        unsigned long totalDur = 0;
+        for (int i = 0; i < historyCount; i++) totalDur += atsHistory[i].duration;
+        
+        for (int i = 0; i < dc; i++) {
+            int idx = (si + i) % MAX_HISTORY_ENTRIES;
+            bool isUtility = (atsHistory[idx].state == ATS_UTILITY_POWER);
+            float pct = totalDur > 0 ? (float)atsHistory[idx].duration * 100.0 / totalDur : 0;
+            
+            page += F("<tr><td>");
+            page += (i + 1);
+            page += F("</td><td><span class='badge ");
+            page += isUtility ? F("utility'>⚡ RED") : F("generator'>🔌 GEN");
+            page += F("</span></td><td>");
+            page += formatDurationLong(atsHistory[idx].duration);
+            page += F("</td><td>");
+            page += formatRealTimestamp(atsHistory[idx].timestamp);
+            page += F("</td><td>");
+            page += String(pct, 2);
+            page += F("%</td></tr>");
+        }
+    }
+    
+    page += F(R"rawliteral(</tbody>
+</table>
+</div>
+</div>
+<div class='footer'>
+<p>CYD Power Monitor v)rawliteral");
+    page += FIRMWARE_VERSION;
+    page += F(R"rawliteral( | ESP32-2432S028 | Sistema de Monitoreo Energético Industrial</p>
+<p style='margin-top:4px'>Página actualizada automáticamente cada 30 segundos</p>
+</div>
+</div>
+</body>
+</html>)rawliteral");
+    
+    return page;
+}
+
+// ============================================
+// OTA PAGE
+// ============================================
+String getOTAPage() {
+    static String cachedPage;
+    static bool cached = false;
+    if (!cached) {
+    String page = F(R"rawliteral(<!DOCTYPE html>
+<html lang='es'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Actualización OTA - CYD Power Monitor</title>
+<style>
+:root{--bg:#0a0e17;--card:#111827;--border:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--accent:#00d4ff;--accent2:#3b82f6;--green:#10b981;--red:#ef4444;--orange:#f59e0b}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+.topbar{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);padding:0;border-bottom:2px solid var(--accent)}
+.topbar-inner{max-width:1400px;margin:0 auto;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.2em;font-weight:bold;color:#000}
+.logo-text h1{color:var(--accent);font-size:1.3em}
+.nav{display:flex;gap:6px;flex-wrap:wrap}
+.nav a{color:var(--muted);text-decoration:none;padding:8px 16px;border-radius:6px;font-size:0.85em;font-weight:500;transition:all 0.2s;border:1px solid transparent}
+.nav a:hover,.nav a.active{color:var(--accent);background:rgba(0,212,255,0.1);border-color:rgba(0,212,255,0.2)}
+.container{max-width:800px;margin:0 auto;padding:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:16px}
+.card-header{padding:14px 18px;border-bottom:1px solid var(--border)}
+.card-header h2{font-size:0.95em;color:var(--accent);display:flex;align-items:center;gap:8px;font-weight:600}
+.card-header h2::before{content:'';width:3px;height:16px;background:var(--accent);border-radius:2px}
+.card-body{padding:18px}
+.upload-area{border:2px dashed var(--border);border-radius:12px;padding:40px;text-align:center;transition:all 0.2s;cursor:pointer}
+.upload-area:hover,.upload-area.dragover{border-color:var(--accent);background:rgba(0,212,255,0.05)}
+.upload-area .icon{font-size:3em;margin-bottom:12px}
+.upload-area h3{color:var(--text);margin-bottom:8px}
+.upload-area p{color:var(--muted);font-size:0.9em;margin-bottom:16px}
+.file-input{display:none}
+.btn{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#000;border:none;padding:12px 32px;border-radius:8px;font-weight:600;font-size:1em;cursor:pointer;transition:all 0.2s;display:inline-block}
+.btn:hover{opacity:0.85;transform:translateY(-1px)}
+.btn:disabled{opacity:0.4;cursor:not-allowed;transform:none}
+.btn-danger{background:linear-gradient(135deg,var(--red),#b91c1c);color:#fff}
+.btn-secondary{background:#1f2937;color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{background:#374151}
+.progress-wrap{display:none;margin-top:20px}
+.progress-bar{height:12px;background:#0f172a;border-radius:6px;overflow:hidden;border:1px solid var(--border);margin-bottom:8px}
+.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:6px;transition:width 0.3s ease;width:0%}
+.progress-text{text-align:center;color:var(--muted);font-size:0.85em}
+.status-msg{padding:12px 16px;border-radius:8px;margin-top:12px;display:none;font-size:0.9em}
+.status-msg.success{background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);color:var(--green)}
+.status-msg.error{background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);color:var(--red)}
+.status-msg.info{background:rgba(0,212,255,0.15);border:1px solid rgba(0,212,255,0.3);color:var(--accent)}
+.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.info-row{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#0f172a;border-radius:8px;font-size:0.85em}
+.info-row .lbl{color:var(--muted)}
+.info-row .val{color:var(--accent);font-weight:600}
+.warning-box{background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:10px;padding:16px;margin-bottom:16px;display:flex;gap:12px;align-items:flex-start}
+.warning-box .wi{font-size:1.5em;flex-shrink:0}
+.warning-box .wt{color:var(--orange);font-size:0.9em}
+.warning-box .wt strong{display:block;margin-bottom:4px}
+.file-info{background:#0f172a;border-radius:8px;padding:12px 16px;margin-top:12px;display:none;font-size:0.85em}
+.file-info .fname{color:var(--accent);font-weight:600}
+.file-info .fsize{color:var(--muted);margin-top:2px}
+footer{text-align:center;padding:24px;color:var(--muted);font-size:0.8em;border-top:1px solid var(--border);margin-top:20px}
+</style>
+</head>
+<body>
+<div class='topbar'>
+<div class='topbar-inner'>
+<div class='logo'>
+<div class='logo-icon'>🔧</div>
+<div class='logo-text'>
+<h1>Actualización OTA</h1>
+</div>
+</div>
+<div class='nav'>
+<a href='/'>Dashboard</a>
+<a href='/history'>Histórico</a>
+<a href='/devices'>Dispositivos</a>
+<a href='/ota' class='active'>Actualización</a>
+</div>
+</div>
+</div>
+<div class='container'>
+<div class='warning-box'>
+<div class='wi'>⚠️</div>
+<div class='wt'>
+<strong>Advertencia de actualización OTA</strong>
+No desconecte la alimentación ni cierre esta página durante el proceso de actualización.
+El dispositivo se reiniciará automáticamente al finalizar.
+</div>
+</div>
+<div class='card'>
+<div class='card-header'>
+<h2>📋 Información del Firmware Actual</h2>
+</div>
+<div class='card-body'>
+<div class='info-grid'>
+<div class='info-row'><span class='lbl'>Versión</span><span class='val'>v)rawliteral");
+    page += FIRMWARE_VERSION;
+    page += F(R"rawliteral(</span></div>
+<div class='info-row'><span class='lbl'>Chip</span><span class='val'>ESP32</span></div>
+<div class='info-row'><span class='lbl'>SDK</span><span class='val'>)rawliteral");
+    page += String(ESP.getSdkVersion());
+    page += F(R"rawliteral(</span></div>
+<div class='info-row'><span class='lbl'>Flash Total</span><span class='val'>)rawliteral");
+    page += String(ESP.getFlashChipSize() / 1024) + "KB";
+    page += F(R"rawliteral(</span></div>
+<div class='info-row'><span class='lbl'>Sketch Size</span><span class='val'>)rawliteral");
+    page += String(ESP.getSketchSize() / 1024) + "KB";
+    page += F(R"rawliteral(</span></div>
+<div class='info-row'><span class='lbl'>Libre para OTA</span><span class='val'>)rawliteral");
+    page += String(ESP.getFreeSketchSpace() / 1024) + "KB";
+    page += F(R"rawliteral(</span></div>
+<div class='info-row'><span class='lbl'>Heap Libre</span><span class='val'>)rawliteral");
+    page += String(ESP.getFreeHeap() / 1024) + "KB";
+    page += F(R"rawliteral(</span></div>
+<div class='info-row'><span class='lbl'>Uptime</span><span class='val'>)rawliteral");
+    page += formatDurationLong(millis() / 1000);
+    page += F(R"rawliteral(</span></div>
+</div>
+</div>
+</div>
+<div class='card'>
+<div class='card-header'>
+<h2>⬆️ Subir Nuevo Firmware</h2>
+</div>
+<div class='card-body'>
+<div class='upload-area' id='dropZone' onclick='document.getElementById("firmware").click()'>
+<div class='icon'>📦</div>
+<h3>Seleccionar archivo .bin</h3>
+<p>Haz clic aquí o arrastra y suelta el archivo de firmware compilado</p>
+<input type='file' id='firmware' class='file-input' accept='.bin'>
+<button class='btn' type='button' onclick='event.stopPropagation();document.getElementById("firmware").click()'>
+Seleccionar Archivo
+</button>
+</div>
+<div class='file-info' id='fileInfo'>
+<div class='fname' id='fileName'>—</div>
+<div class='fsize' id='fileSize'>—</div>
+</div>
+<div class='progress-wrap' id='progressWrap'>
+<div class='progress-bar'>
+<div class='progress-fill' id='progressFill'></div>
+</div>
+<div class='progress-text' id='progressText'>Subiendo... 0%</div>
+</div>
+<div class='status-msg' id='statusMsg'></div>
+<div style='margin-top:20px;display:flex;gap:12px;flex-wrap:wrap'>
+<button class='btn' id='uploadBtn' onclick='startUpload()' disabled>
+⬆️ Iniciar Actualización
+</button>
+<button class='btn btn-secondary' onclick='window.location="/"'>
+← Volver al Dashboard
+</button>
+</div>
+</div>
+</div>
+<div class='card'>
+<div class='card-header'>
+<h2>🔄 Reiniciar Dispositivo</h2>
+</div>
+<div class='card-body'>
+<p style='color:var(--muted);margin-bottom:16px;font-size:0.9em'>
+Reinicia el ESP32 sin actualizar el firmware. Útil para aplicar cambios de configuración.
+</p>
+<button class='btn btn-danger' onclick='rebootDevice()'>
+🔄 Reiniciar Ahora
+</button>
+</div>
+</div>
+</div>
+<footer>
+<p>CYD Power Monitor v)rawliteral");
+    page += FIRMWARE_VERSION;
+    page += F(R"rawliteral( | ESP32-2432S028</p>
+</footer>
+<script>
+const firmware = document.getElementById('firmware');
+const uploadBtn = document.getElementById('uploadBtn');
+const progressWrap = document.getElementById('progressWrap');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const statusMsg = document.getElementById('statusMsg');
+const fileInfo = document.getElementById('fileInfo');
+const dropZone = document.getElementById('dropZone');
+
+firmware.addEventListener('change', function() {
+  if (this.files.length > 0) {
+    const f = this.files[0];
+    document.getElementById('fileName').textContent = '📄 ' + f.name;
+    document.getElementById('fileSize').textContent = 'Tamaño: ' + (f.size / 1024).toFixed(1) + ' KB';
+    fileInfo.style.display = 'block';
+    uploadBtn.disabled = false;
+    showStatus('Archivo listo. Haz clic en "Iniciar Actualización" para continuar.', 'info');
+  }
+});
+
+dropZone.addEventListener('dragover', function(e) {
+  e.preventDefault();
+  this.classList.add('dragover');
+});
+dropZone.addEventListener('dragleave', function() {
+  this.classList.remove('dragover');
+});
+dropZone.addEventListener('drop', function(e) {
+  e.preventDefault();
+  this.classList.remove('dragover');
+  const files = e.dataTransfer.files;
+  if (files.length > 0 && files[0].name.endsWith('.bin')) {
+    firmware.files = files;
+    const f = files[0];
+    document.getElementById('fileName').textContent = '📄 ' + f.name;
+    document.getElementById('fileSize').textContent = 'Tamaño: ' + (f.size / 1024).toFixed(1) + ' KB';
+    fileInfo.style.display = 'block';
+    uploadBtn.disabled = false;
+    showStatus('Archivo listo. Haz clic en "Iniciar Actualización" para continuar.', 'info');
+  } else {
+    showStatus('Error: Solo se aceptan archivos .bin de firmware ESP32.', 'error');
+  }
+});
+
+const showStatus=(msg, type)=>{
+  statusMsg.textContent = msg;
+  statusMsg.className = 'status-msg ' + type;
+  statusMsg.style.display = 'block';
+}
+
+const startUpload=()=>{
+  const file = firmware.files[0];
+  if (!file) { showStatus('Selecciona un archivo primero.', 'error'); return; }
+
+  uploadBtn.disabled = true;
+  progressWrap.style.display = 'block';
+  showStatus('⏳ Subiendo firmware, por favor espera...', 'info');
+
+  const formData = new FormData();
+  formData.append('firmware', file);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update?key=)rawliteral");
+    page += OTA_API_KEY;
+    page += F(R"rawliteral(', true);
+
+  xhr.upload.onprogress = function(e) {
+    if (e.lengthComputable) {
+      const pct = Math.round((e.loaded / e.total) * 100);
+      progressFill.style.width = pct + '%';
+      progressText.textContent = 'Subiendo... ' + pct + '%';
+    }
+  };
+
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      progressFill.style.width = '100%';
+      progressText.textContent = '✅ Completado';
+      showStatus('✅ Firmware actualizado correctamente. El dispositivo se reiniciará en 3 segundos...', 'success');
+      setTimeout(function() { window.location = '/'; }, 5000);
+    } else {
+      showStatus('❌ Error al actualizar: ' + xhr.responseText, 'error');
+      uploadBtn.disabled = false;
+    }
+  };
+
+  xhr.onerror = function() {
+    showStatus('❌ Error de conexión durante la actualización.', 'error');
+    uploadBtn.disabled = false;
+  };
+
+  xhr.send(formData);
+}
+
+const rebootDevice=()=>{
+  if (confirm('¿Confirmas que deseas reiniciar el dispositivo?')) {
+    showStatus('🔄 Enviando comando de reinicio...', 'info');
+    fetch('/reboot', { method: 'POST' })
+      .then(function() {
+        showStatus('✅ Reiniciando... Serás redirigido al Dashboard en 8 segundos.', 'success');
+        setTimeout(function() { window.location = '/'; }, 8000);
+      })
+      .catch(function() {
+        showStatus('✅ Reiniciando... (sin respuesta esperada)', 'success');
+        setTimeout(function() { window.location = '/'; }, 8000);
+      });
+  }
+}
+</script>
+</body>
+</html>)rawliteral");
+        cachedPage = page;
+        cached = true;
+    }
+    return cachedPage;
+}
+
+// ============================================
+// JSON API
+// ============================================
+String getJsonData() {
+    StaticJsonDocument<1024> doc;
+    
+    JsonObject pzem = doc.createNestedObject("pzem");
+    pzem["voltage"]   = pzemData.voltage;
+    pzem["current"]   = pzemData.current;
+    pzem["power"]     = pzemData.power;
+    pzem["energy"]    = pzemData.energy;
+    pzem["frequency"] = pzemData.frequency;
+    pzem["pf"]        = pzemData.pf;
+    pzem["valid"]     = pzemData.isValid;
+    
+    JsonObject ats = doc.createNestedObject("ats");
+    ats["state"]       = atsGetStateName(atsState);
+    ats["timeInState"] = atsGetTimeInState();
+    ats["changes"]     = historyCount;
+    ats["utilPct"]     = atsGetPercentageInState(ATS_UTILITY_POWER);
+    ats["genPct"]      = atsGetPercentageInState(ATS_GENERATOR_POWER);
+    
+    JsonObject sys = doc.createNestedObject("system");
+    sys["uptime"]    = millis() / 1000;
+    sys["freeHeap"]  = ESP.getFreeHeap();
+    sys["rssi"]      = WiFi.RSSI();
+    sys["ip"]        = WiFi.localIP().toString();
+    sys["version"]   = FIRMWARE_VERSION;
+    
+    String output;
+    serializeJson(doc, output);
+    return output;
+}
+
+String getDevicesJsonData() {
+    DynamicJsonDocument doc(6144);
+    JsonArray arr = doc.to<JsonArray>();
+    if (devicesMutex != NULL) xSemaphoreTake(devicesMutex, portMAX_DELAY);
+    for (int i = 0; i < deviceCount; i++) {
+        JsonObject d = arr.createNestedObject();
+        d["name"] = devices[i].name;
+        d["state"] = devices[i].state;
+        d["hasEnergyMonitoring"] = devices[i].hasEnergyMonitoring;
+        d["metricsValid"] = devices[i].metricsValid;
+        d["power"] = devices[i].lastPower;
+        d["voltage"] = devices[i].lastVoltage;
+        d["current"] = devices[i].lastCurrent;
+        d["pollFailures"] = devices[i].pollFailures;
+    }
+    if (devicesMutex != NULL) xSemaphoreGive(devicesMutex);
+    String out;
+    serializeJson(doc, out);
+    return out;
+}
+
+// ============================================
+// WEB SERVER ROUTES
+// ============================================
+
+// ============================================
+// THEME ENGINE - 6 INTERFACES
+// ============================================
+
+const char* uiThemeName(uint8_t theme) {
+    switch (theme) {
+        case THEME_SCADA:     return "Industrial SCADA";
+        case THEME_MINIMAL:   return "Minimalista";
+        case THEME_CYBERPUNK: return "Cyberpunk";
+        case THEME_RETRO:     return "Retro Terminal";
+        case THEME_GLASS:     return "Glassmorphism";
+        case THEME_TESLA:     return "Tesla / App moderna";
+        default:              return "Tesla / App moderna";
+    }
+}
+
+void uiLoadTheme() {
+    themePreferences.begin("ui", true);
+    uint8_t saved = themePreferences.getUChar("theme", THEME_TESLA);
+    themePreferences.end();
+
+    if (saved >= 6) saved = THEME_TESLA;
+
+    currentTheme = saved;
+    previousTheme = saved;
+}
+
+void uiSaveTheme() {
+    themePreferences.begin("ui", false);
+    themePreferences.putUChar("theme", currentTheme);
+    themePreferences.end();
+}
+
+void uiSetTheme(uint8_t theme) {
+    if (theme >= 6) return;
+
+    if (currentTheme == theme) {
+        uiResetDrawState();
+        if (displayInitialized) tft.fillScreen(UI_BG);
+        return;
+    }
+
+    currentTheme = theme;
+    uiSaveTheme();
+
+    // Fuerza una reconstruccion completa en el siguiente ciclo.
+    uiResetDrawState();
+    if (displayInitialized) tft.fillScreen(UI_BG);
+}
+
+void uiNextTheme() {
+    currentTheme = (currentTheme + 1) % 6;
+    uiSaveTheme();
+
+    uiResetDrawState();
+    if (displayInitialized) tft.fillScreen(UI_BG);
+}
+
+String themeSourceName() {
+    if (!pzemData.isValid) return "SIN DATOS";
+    if (atsState == ATS_UTILITY_POWER) return "RED ELECTRICA";
+    if (atsState == ATS_GENERATOR_POWER) return "GENERADOR";
+    return "DESCONOCIDO";
+}
+
+uint16_t themeSourceColor() {
+    if (!pzemData.isValid) return UI_RED;
+    if (atsState == ATS_UTILITY_POWER) return UI_GREEN;
+    if (atsState == ATS_GENERATOR_POWER) return UI_ORANGE;
+    return UI_RED;
+}
+
+String themePower() {
+    return pzemData.isValid ? String((int)round(pzemData.power)) + " W" : "-- W";
+}
+
+String themeVoltage() {
+    return pzemData.isValid ? String(pzemData.voltage, 1) + " V" : "-- V";
+}
+
+String themeCurrent() {
+    return pzemData.isValid ? String(pzemData.current, 2) + " A" : "-- A";
+}
+
+String themePF() {
+    return pzemData.isValid ? String(pzemData.pf, 2) : "--";
+}
+
+String themeFrequency() {
+    return pzemData.isValid ? String(pzemData.frequency, 1) + " Hz" : "-- Hz";
+}
+
+String themeEnergy() {
+    return pzemData.isValid ? String(pzemData.energy / 1000.0, 2) + " kWh" : "-- kWh";
+}
+
+void themeHeader(const String& title, uint16_t bg, uint16_t accent, uint16_t text, uint16_t muted) {
+    tft.fillRect(0, 0, DISPLAY_WIDTH, 31, bg);
+    tft.drawFastHLine(0, 30, DISPLAY_WIDTH, accent);
+    tft.setTextSize(2);
+    tft.setTextColor(text, bg);
+    tft.setCursor(7, 6);
+    tft.print(title);
+
+    tft.setTextSize(1);
+    tft.setTextColor(muted, bg);
+    tft.setCursor(216, 6);
+    tft.print("T");
+    tft.print(currentTheme + 1);
+    tft.print("/6");
+
+    bool wifiOk = WiFi.status() == WL_CONNECTED;
+    tft.fillCircle(290, 10, 4, wifiOk ? UI_GREEN : UI_RED);
+    tft.setTextColor(wifiOk ? UI_GREEN : UI_RED, bg);
+    tft.setCursor(298, 6);
+    tft.print(wifiOk ? "OK" : "NO");
+}
+
+void themeFooter(uint16_t bg, uint16_t muted) {
+    tft.fillRect(0, 219, 320, 21, bg);
+    tft.setTextSize(1);
+    tft.setTextColor(muted, bg);
+    tft.setCursor(6, 224);
+    tft.print("CYD Power  |  ");
+    tft.print(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi");
+    tft.setCursor(254, 224);
+    tft.print("T");
+    tft.print(currentTheme + 1);
+}
+
+void themeDrawBase(const char* title,
+                    uint16_t bg, uint16_t panel, uint16_t textColor,
+                    uint16_t muted, uint16_t accent) {
+    if (!themeStaticDrawn) {
+        tft.fillScreen(bg);
+
+        tft.fillRect(0, 0, DISPLAY_WIDTH, 31, panel);
+        tft.drawFastHLine(0, 30, DISPLAY_WIDTH, accent);
+        tft.setTextSize(2);
+        tft.setTextColor(textColor, panel);
+        tft.setCursor(7, 6);
+        tft.print(title);
+
+        tft.setTextSize(1);
+        tft.setTextColor(accent, panel);
+        tft.setCursor(250, 8);
+        tft.print("T");
+        tft.print(currentTheme + 1);
+        tft.print("/6");
+
+        tft.fillRoundRect(6, 38, 308, 67, 8, panel);
+        tft.drawRoundRect(6, 38, 308, 67, 8, accent);
+
+        tft.setTextSize(1);
+        tft.setTextColor(muted, panel);
+        tft.setCursor(15, 47);
+        tft.print("POTENCIA ACTIVA");
+
+        tft.fillRoundRect(6, 110, 98, 38, 6, panel);
+        tft.fillRoundRect(111, 110, 98, 38, 6, panel);
+        tft.fillRoundRect(216, 110, 98, 38, 6, panel);
+        tft.drawRoundRect(6, 110, 98, 38, 6, accent);
+        tft.drawRoundRect(111, 110, 98, 38, 6, accent);
+        tft.drawRoundRect(216, 110, 98, 38, 6, accent);
+
+        tft.setTextSize(1);
+        tft.setTextColor(muted, panel);
+        tft.setCursor(13, 117);  tft.print("VOLTAJE");
+        tft.setCursor(118, 117); tft.print("CORRIENTE");
+        tft.setCursor(223, 117); tft.print("FUENTE");
+
+        themeStaticDrawn = true;
+    }
+
+    tft.fillRect(14, 61, 190, 30, panel);
+    tft.setTextSize(3);
+    tft.setTextColor(textColor, panel);
+    tft.setCursor(14, 61);
+    tft.print(pzemData.isValid ? String((int)round(pzemData.power)) + " W" : "-- W");
+
+    String v = pzemData.isValid ? String(pzemData.voltage, 1) + " V" : "-- V";
+    String a = pzemData.isValid ? String(pzemData.current, 2) + " A" : "-- A";
+    String source = themeSourceName();
+
+    tft.fillRect(12, 127, 90, 15, panel);
+    tft.fillRect(117, 127, 90, 15, panel);
+    tft.fillRect(222, 127, 88, 15, panel);
+
+    tft.setTextSize(1);
+    tft.setTextColor(0x07FF, panel);
+    tft.setCursor(13, 130);
+    tft.print(v);
+
+    tft.setTextColor(0xFFE0, panel);
+    tft.setCursor(118, 130);
+    tft.print(a);
+
+    tft.setTextColor(themeSourceColor(), panel);
+    tft.setCursor(223, 130);
+    tft.print(source);
+
+    tft.fillRect(218, 3, 27, 22, panel);
+    tft.setTextColor(WiFi.status() == WL_CONNECTED ? 0x07E0 : 0xF800, panel);
+    tft.setCursor(220, 7);
+    tft.print(WiFi.status() == WL_CONNECTED ? "NET" : "NO");
+
+    displayDrawDeviceList();
+}
+
+void themeDrawSCADA() {
+    themeDrawBase("SCADA POWER", 0x0000, 0x18C3, 0xFFFF, 0xBDF7, 0x07E0);
+}
+
+void themeDrawMinimal() {
+    themeDrawBase("CYD POWER", 0x0000, 0x0841, 0xFFFF, 0xBDF7, 0x07FF);
+}
+
+void themeDrawCyberpunk() {
+    themeDrawBase("CYBER//POWER", 0x1008, 0x210A, 0xFFFF, 0xBDF7, 0xF81F);
+}
+
+String uiClockText() {
+    struct tm ti;
+    if (!getLocalTime(&ti, 10)) return "--:--";
+    char buf[6];
+    strftime(buf, sizeof(buf), "%H:%M", &ti);
+    return String(buf);
+}
+
+void themeDrawRetro() {
+    // Retro Terminal: conserva la identidad original verde sobre negro,
+    // pero usa una distribución fija para evitar que los valores se
+    // dibujen encima de las etiquetas.
+    const uint16_t bg = 0x0000;
+    const uint16_t green = 0x07E0;
+    const uint16_t dim = 0x03E0;
+    const uint16_t cyan = 0x07FF;
+    const uint16_t yellow = 0xFFE0;
+
+    if (!themeStaticDrawn) {
+        tft.fillScreen(bg);
+        tft.drawRect(3, 3, 314, 234, green);
+
+        // HEADER
+        tft.setTextSize(1);
+        tft.setTextColor(green, bg);
+        tft.setCursor(9, 9);
+        tft.print("POWER_TERMINAL");
+        tft.setCursor(253, 9);
+        tft.print("[T4]");
+        tft.drawFastHLine(7, 22, 306, green);
+
+        // POWER BLOCK
+        tft.setCursor(9, 30);
+        tft.print("> POTENCIA ACTIVA");
+        tft.drawFastHLine(7, 41, 306, dim);
+
+        // METRIC COLUMNS
+        tft.setCursor(9, 61);
+        tft.print("VOLTAJE");
+        tft.setCursor(112, 61);
+        tft.print("CORRIENTE");
+        tft.setCursor(222, 61);
+        tft.print("FUENTE");
+        tft.drawFastHLine(7, 84, 306, green);
+
+        // DEVICES
+        tft.setCursor(9, 89);
+        tft.print("DISPOSITIVOS CONECTADOS");
+        tft.drawFastHLine(7, 96, 306, dim);
+
+        // FOOTER
+        tft.drawFastHLine(7, 218, 306, green);
+        tft.setCursor(9, 224);
+        tft.print("CYD POWER");
+        tft.setCursor(222, 224);
+        tft.print("T4");
+
+        themeStaticDrawn = true;
+    }
+
+    // Hora: siempre separada del título.
+    tft.fillRect(190, 5, 120, 14, bg);
+    tft.setTextSize(1);
+    tft.setTextColor(green, bg);
+    tft.setCursor(190, 9);
+    tft.print(uiClockText());
+
+    // Potencia: valor en su propia línea.
+    tft.fillRect(9, 43, 302, 18, bg);
+    tft.setTextSize(2);
+    tft.setTextColor(green, bg);
+    tft.setCursor(9, 43);
+    tft.print(themePower());
+
+    // Valores de las tres columnas: no comparten línea con las etiquetas.
+    tft.fillRect(9, 69, 94, 12, bg);
+    tft.fillRect(112, 69, 94, 12, bg);
+    tft.fillRect(222, 69, 88, 12, bg);
+    tft.setTextSize(1);
+
+    tft.setTextColor(cyan, bg);
+    tft.setCursor(9, 69);
+    tft.print(themeVoltage());
+
+    tft.setTextColor(yellow, bg);
+    tft.setCursor(112, 69);
+    tft.print(themeCurrent());
+
+    tft.setTextColor(themeSourceColor(), bg);
+    tft.setCursor(222, 69);
+    tft.print(themeSourceName());
+
+    displayDrawDeviceListRetro();
+
+    // IP en el footer, alineada a la derecha sin tocar el resto del diseño.
+    tft.fillRect(42, 221, 174, 13, bg);
+    tft.setTextColor(dim, bg);
+    tft.setCursor(42, 224);
+    if (WiFi.status() == WL_CONNECTED) {
+        tft.print(WiFi.localIP());
+    } else {
+        tft.print("sin WiFi");
+    }
+}
+
+void themeDrawGlass() {
+    themeDrawBase("GLASS POWER", 0x0821, 0x2106, 0xFFFF, 0xBDF7, 0x5DDF);
+}
+
+// Renderer exclusivo del tema Retro Terminal. Mantiene el mismo estilo
+// visual del tema original y limita la información a cuatro filas para que
+// nunca invada el footer.
+void displayDrawDeviceListRetro() {
+    const int startX = 9;
+    const int startY = 100;
+    const int rowH = 28;
+    const int maxRows = 4;
+    const uint16_t bg = 0x0000;
+    const uint16_t green = 0x07E0;
+    const uint16_t dim = 0x03E0;
+    const uint16_t cyan = 0x07FF;
+    const uint16_t yellow = 0xFFE0;
+
+    struct RetroRow {
+        String name;
+        bool state;
+        bool hasEnergy;
+        bool metricsValid;
+        float power;
+        float voltage;
+        float current;
+    };
+
+    RetroRow rows[maxRows];
+    int rowCount = 0;
+
+    if (devicesMutex != NULL) {
+        xSemaphoreTake(devicesMutex, portMAX_DELAY);
+        for (int i = 0; i < deviceCount && rowCount < maxRows; i++) {
+            if (devices[i].pollFailures != 0) continue;
+
+            rows[rowCount].name = devices[i].name;
+            rows[rowCount].state = devices[i].state;
+            rows[rowCount].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[rowCount].metricsValid = devices[i].metricsValid;
+            rows[rowCount].power = devices[i].lastPower;
+            rows[rowCount].voltage = devices[i].lastVoltage;
+            rows[rowCount].current = devices[i].lastCurrent;
+            rowCount++;
+        }
+        xSemaphoreGive(devicesMutex);
+    }
+
+    // Limpia solamente la zona dinámica de dispositivos.
+    tft.fillRect(7, startY, 306, 116, bg);
+
+    if (rowCount == 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(dim, bg);
+        tft.setCursor(startX, 108);
+        tft.print("> esperando dispositivos...");
+        return;
+    }
+
+    for (int i = 0; i < rowCount; i++) {
+        const int y = startY + i * rowH;
+
+        // Línea de dispositivo: nombre arriba; valores abajo.
+        tft.fillRect(8, y, 304, 26, bg);
+        tft.setTextSize(1);
+        tft.setTextColor(rows[i].state ? green : 0xF800, bg);
+        tft.setCursor(startX, y + 2);
+        tft.print("> ");
+
+        String nm = rows[i].name;
+        if (nm.length() > 22) nm = nm.substring(0, 21) + ".";
+        tft.print(nm);
+
+        tft.setCursor(startX + 210, y + 2);
+        tft.print(rows[i].state ? "ON" : "OFF");
+
+        tft.setTextColor(rows[i].hasEnergy && rows[i].metricsValid ? yellow : dim, bg);
+        tft.setCursor(startX + 16, y + 14);
+
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            tft.print(String((int)round(rows[i].power)));
+            tft.print("W");
+
+            tft.setTextColor(cyan, bg);
+            tft.setCursor(startX + 100, y + 14);
+            tft.print(String(rows[i].voltage, 1));
+            tft.print("V");
+
+            tft.setTextColor(yellow, bg);
+            tft.setCursor(startX + 172, y + 14);
+            tft.print(String(rows[i].current, 2));
+            tft.print("A");
+        } else {
+            tft.print("ON/OFF");
+        }
+
+        if (i < rowCount - 1) {
+            tft.drawFastHLine(8, y + 26, 304, dim);
+        }
+    }
+}
+
+// Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
+// define AQUI, despues de device_manager.h, porque necesita el arreglo
+// devices[] y el mutex que lo protege entre nucleos.
+#define DISPLAY_MAX_DEVICE_ROWS 5
+void displayDrawDeviceList() {
+    // Solo muestra dispositivos que respondieron al ultimo sondeo.
+    const int startX = 8;
+    const int startY = 164;
+    const int rowH = 15;
+    const int maxRows = 4;
+
+    struct RowData {
+        String name;
+        bool state;
+        bool hasEnergy;
+        bool metricsValid;
+        float power;
+        float voltage;
+        float current;
+    };
+
+    RowData rows[maxRows];
+    int rowCount = 0;
+
+    if (devicesMutex != NULL) {
+        xSemaphoreTake(devicesMutex, portMAX_DELAY);
+
+        for (int i = 0; i < deviceCount && rowCount < maxRows; i++) {
+            if (devices[i].pollFailures != 0) continue;
+
+            rows[rowCount].name = devices[i].name;
+            rows[rowCount].state = devices[i].state;
+            rows[rowCount].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[rowCount].metricsValid = devices[i].metricsValid;
+            rows[rowCount].power = devices[i].lastPower;
+            rows[rowCount].voltage = devices[i].lastVoltage;
+            rows[rowCount].current = devices[i].lastCurrent;
+            rowCount++;
+        }
+
+        xSemaphoreGive(devicesMutex);
+    }
+
+    String signature = String(rowCount);
+    for (int i = 0; i < rowCount; i++) {
+        signature += "|" + rows[i].name + ":" + String(rows[i].state) + ":" +
+                     ((rows[i].hasEnergy && rows[i].metricsValid)
+                        ? String((int)rows[i].power) + ":" +
+                          String(rows[i].voltage, 1) + ":" +
+                          String(rows[i].current, 2)
+                        : "-");
+    }
+
+    if (!uiDeviceListTitleDrawn) {
+        tft.fillRect(0, 148, DISPLAY_WIDTH, 15, UI_BG);
+        tft.setTextSize(1);
+        tft.setTextColor(0xFFFF, UI_BG);
+        tft.setCursor(startX, 151);
+        tft.print("DISPOSITIVOS CONECTADOS");
+        tft.drawFastHLine(startX, 161, 170, 0x07FF);
+        uiDeviceListTitleDrawn = true;
+    }
+
+    if (signature == uiDeviceListLastSignature) return;
+    uiDeviceListLastSignature = signature;
+
+    tft.fillRect(0, startY, DISPLAY_WIDTH, maxRows * rowH, UI_BG);
+
+    if (rowCount == 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(UI_MUTED, UI_BG);
+        tft.setCursor(startX, startY + 4);
+        tft.print("Esperando dispositivos conectados...");
+        return;
+    }
+
+    for (int i = 0; i < rowCount; i++) {
+        int y = startY + i * rowH;
+        uint16_t rowBg = (i % 2 == 0) ? 0x1082 : UI_BG;
+
+        if (i % 2 == 0)
+            tft.fillRect(startX, y, DISPLAY_WIDTH - startX * 2, rowH - 1, rowBg);
+
+        tft.fillCircle(startX + 7, y + 7, 3, rows[i].state ? 0x07E0 : 0xFD20);
+
+        tft.setTextSize(1);
+        tft.setTextColor(0xFFFF, rowBg);
+        tft.setCursor(startX + 16, y + 3);
+
+        String nm = rows[i].name;
+        if (nm.length() > 18) nm = nm.substring(0, 17) + ".";
+        tft.print(nm);
+
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            tft.setTextColor(0xFFE0, rowBg);
+            tft.setCursor(188, y + 3);
+            tft.print(String((int)rows[i].power) + "W");
+
+            tft.setTextColor(0x07FF, rowBg);
+            tft.setCursor(239, y + 3);
+            tft.print(String(rows[i].voltage, 0) + "V ");
+            tft.print(String(rows[i].current, 1) + "A");
+        } else {
+            tft.setTextColor(rows[i].state ? 0x07E0 : 0xFD20, rowBg);
+            tft.setCursor(272, y + 3);
+            tft.print(rows[i].state ? "ON" : "OFF");
+        }
+    }
+}
+
+// Rate limiting: permite hasta RATE_LIMIT_MAX_REQUESTS por ventana de tiempo
+bool checkRateLimit() {
+    unsigned long now = millis();
+    if (now - rateLimitWindowStart >= RATE_LIMIT_WINDOW_MS) {
+        rateLimitWindowStart = now;
+        rateLimitRequestCount = 0;
+    }
+    rateLimitRequestCount++;
+    return rateLimitRequestCount <= RATE_LIMIT_MAX_REQUESTS;
+}
+
+#if CYD_V4_HAS_WEBSOCKET
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+    if (type == WStype_CONNECTED) {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("V4 WebSocket conectado: %s\n", ip.toString().c_str());
+        webSocket.sendTXT(num, getJsonData());
+    } else if (type == WStype_DISCONNECTED) {
+        Serial.printf("V4 WebSocket desconectado: #%u\n", num);
+    }
+}
+
+void webSocketBeginV4() {
+    webSocket.begin();
+    webSocket.onEvent(webSocketEvent);
+    Serial.println("V4 WebSocket activo en puerto 81");
+}
+
+void webSocketTickV4() {
+    webSocket.loop();
+    unsigned long now = millis();
+    if (now - wsLastBroadcast >= 250) {
+        wsLastBroadcast = now;
+        webSocket.broadcastTXT(getJsonData());
+    }
+}
+#else
+void webSocketBeginV4() {
+    Serial.println("V4 WebSocket no instalado: usando fallback HTTP 1s");
+}
+void webSocketTickV4() {}
+#endif
+
+void webServerSetup() {
+    // Main dashboard
+    server.on("/", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
+        server.send(200, "text/html", getMainPage());
+    });
+    
+    // ATS history page
+    server.on("/history", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
+        String filter = server.hasArg("filter") ? server.arg("filter") : "day";
+        server.send(200, "text/html", getHistoryPage(filter));
+    });
+    
+    // Exportar historial ATS a CSV
+    server.on("/history.csv", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
+        String csv = "numero,estado,duracion_seg,fecha_hora\n";
+        for (int i = 0; i < historyCount; i++) {
+            int idx = (historyCount < MAX_HISTORY_ENTRIES) ? i : (historyIndex + i) % MAX_HISTORY_ENTRIES;
+            csv += String(i + 1) + ",";
+            csv += (atsHistory[idx].state == ATS_UTILITY_POWER) ? "RED" : "GENERADOR";
+            csv += ",";
+            csv += String(atsHistory[idx].duration);
+            csv += ",";
+            csv += formatRealTimestamp(atsHistory[idx].timestamp);
+            csv += "\n";
+        }
+        server.sendHeader("Content-Disposition", "attachment; filename=historico_ats.csv");
+        server.send(200, "text/csv", csv);
+    });
+    
+    // OTA update page
+    server.on("/ota", HTTP_GET, []() {
+        server.send(200, "text/html", getOTAPage());
+    });
+    
+    // Administrador de dispositivos (Tasmota/OpenBeken) + standby de pantalla
+    deviceManagerWebBegin();
+    
+    // JSON API endpoint
+    server.on("/api/data", HTTP_GET, []() {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(200, "application/json", getJsonData());
+    });
+
+    // V4: estado de dispositivos separado para no inflar el paquete de telemetria principal.
+    server.on("/api/devices", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+            return;
+        }
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.sendHeader("Cache-Control", "no-store");
+        server.send(200, "application/json", getDevicesJsonData());
+    });
+    
+    // ATS history JSON
+    server.on("/api/history", HTTP_GET, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "application/json", "{\"error\":\"Demasiadas peticiones\"}");
+            return;
+        }
+        StaticJsonDocument<4096> doc;
+        JsonArray arr = doc.createNestedArray("history");
+        for (int i = 0; i < historyCount; i++) {
+            JsonObject entry = arr.createNestedObject();
+            entry["timestamp"] = atsHistory[i].timestamp;
+            entry["state"]     = atsGetStateName(atsHistory[i].state);
+            entry["duration"]  = atsHistory[i].duration;
+        }
+        doc["count"]   = historyCount;
+        doc["current"] = atsGetStateName(atsState);
+        String output;
+        serializeJson(doc, output);
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(200, "application/json", output);
+    });
+
+    // Reboot endpoint
+    // Selector de temas: /theme?set=0..5
+    // Tambien permite abrir /theme desde el telefono para cambiar la apariencia.
+    server.on("/theme", HTTP_GET, []() {
+        if (server.hasArg("set")) {
+            int requested = server.arg("set").toInt();
+            if (requested >= 0 && requested <= 5) {
+                uiSetTheme((uint8_t)requested);
+            }
+            server.sendHeader("Location", "/theme");
+            server.send(303, "text/plain", "");
+            return;
+        }
+
+        String page;
+        page.reserve(5000);
+        page += F("<!doctype html><html lang='es'><head><meta name='viewport' content='width=device-width,initial-scale=1'>");
+        page += F("<title>CYD Power - Temas</title><style>");
+        page += F("body{margin:0;background:#0a0e17;color:#e5e7eb;font-family:Arial,sans-serif;padding:20px}");
+        page += F("h1{color:#00d4ff} .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}");
+        page += F("a{display:block;text-decoration:none;color:#fff;background:#111827;border:1px solid #334155;border-radius:12px;padding:22px;text-align:center}");
+        page += F("a.active{border:2px solid #00d4ff;background:#172033}.n{font-size:1.1em;font-weight:bold}.s{font-size:.8em;color:#94a3b8;margin-top:6px}");
+        page += F("</style></head><body><h1>CYD Power Monitor</h1><p>Tema actual: <b>");
+        page += uiThemeName(currentTheme);
+        page += F("</b></p><div class='grid'>");
+
+        for (int i = 0; i < 6; i++) {
+            page += "<a class='";
+            if (i == currentTheme) page += "active";
+            page += "' href='/theme?set=";
+            page += String(i);
+            page += "'><div class='n'>";
+            page += String(i + 1);
+            page += ". ";
+            page += uiThemeName(i);
+            page += F("</div><div class='s'>Tocar para aplicar</div></a>");
+        }
+
+        page += F("</div><p style='margin-top:24px'><a href='/' style='display:inline-block;padding:12px 18px'>← Dashboard</a></p>");
+        page += F("</body></html>");
+        server.send(200, "text/html; charset=utf-8", page);
+    });
+
+    server.on("/api/theme", HTTP_GET, []() {
+        String json = "{\"theme\":" + String(currentTheme) +
+                      ",\"name\":\"" + String(uiThemeName(currentTheme)) + "\"}";
+        server.send(200, "application/json", json);
+    });
+
+    server.on("/reboot", HTTP_POST, []() {
+        if (!checkRateLimit()) {
+            server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+            return;
+        }
+        server.send(200, "text/plain", "Rebooting...");
+        delay(500);
+        ESP.restart();
+    });
+    
+    // OTA firmware upload handler (con autenticacion basica por API key)
+    server.on("/update", HTTP_POST,
+        []() {
+            if (!checkRateLimit()) {
+                server.send(429, "text/plain", "Demasiadas peticiones. Intenta mas tarde.");
+                return;
+            }
+            if (!server.hasArg("key") || server.arg("key") != OTA_API_KEY) {
+                server.send(401, "text/plain", "No autorizado: se requiere API key");
+                return;
+            }
+            bool success = !Update.hasError();
+            server.sendHeader("Connection", "close");
+            server.send(success ? 200 : 500,
+                        "text/plain",
+                        success ? "OK" : Update.errorString());
+            if (success) {
+                delay(500);
+                ESP.restart();
+            }
+        },
+        // Upload handler (called for each chunk)
+        []() {
+            HTTPUpload& upload = server.upload();
+            
+            if (upload.status == UPLOAD_FILE_START) {
+                Serial.printf("OTA Start: %s\n", upload.filename.c_str());
+                setLED(false, false, true);  // Blue = uploading
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                    Update.printError(Serial);
+                }
+            } else if (upload.status == UPLOAD_FILE_WRITE) {
+                if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+                    Update.printError(Serial);
+                }
+                // Show progress on TFT
+                if (displayInitialized) {
+                    unsigned long pct = (upload.totalSize > 0)
+                        ? (upload.currentSize * 100 / upload.totalSize) : 0;
+                    tft.fillRect(10, 110, 300, 20, 0x18C3);
+                    tft.fillRect(10, 110, (300 * pct) / 100, 20, COLOR_CYAN);
+                    tft.setTextColor(COLOR_WHITE);
+                    tft.setTextSize(1);
+                    tft.setCursor(10, 113);
+                    tft.printf("OTA: %lu%%  %lu bytes", pct, upload.totalSize);
+                }
+            } else if (upload.status == UPLOAD_FILE_END) {
+                if (Update.end(true)) {
+                    Serial.printf("OTA Success: %u bytes\n", upload.totalSize);
+                    setLED(false, true, false);  // Green = success
+                    if (displayInitialized) {
+                        tft.fillScreen(COLOR_BG);
+                        tft.setTextColor(COLOR_GREEN);
+                        tft.setTextSize(2);
+                        tft.setCursor(20, 80);
+                        tft.print("OTA exitoso!");
+                        tft.setTextColor(COLOR_WHITE);
+                        tft.setTextSize(1);
+                        tft.setCursor(20, 110);
+                        tft.print("Reiniciando...");
+                    }
+                } else {
+                    Update.printError(Serial);
+                    setLED(true, false, false);  // Red = error
+                }
+            }
+        }
+    );
+    
+    // 404 handler
+    server.onNotFound([]() {
+        server.send(404, "text/html",
+            "<html><body style='background:#0a0e17;color:#e5e7eb;font-family:sans-serif;"
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
+            "<div style='text-align:center'><h1 style='color:#00d4ff;font-size:4em'>404</h1>"
+            "<p>Página no encontrada</p>"
+            "<a href='/' style='color:#00d4ff'>← Volver al Dashboard</a>"
+            "</div></body></html>");
+    });
+    
+    server.begin();
+    Serial.println("Web server started on port " + String(WEB_SERVER_PORT));
+}
+
+// ============================================
+// WIFI SETUP
+// ============================================
+bool wifiSetup() {
+    String hostname = String(HOSTNAME_PREFIX) + "-" + WiFi.macAddress().substring(12);
+    hostname.replace(":", "");
+    WiFi.setHostname(hostname.c_str());
+    
+    wm.setConfigPortalTimeout(WIFI_MANAGER_TIMEOUT);
+    wm.setAPCallback([](WiFiManager* wm) {
+        Serial.println("WiFi portal started");
+        displayWiFiPortalInfo();
+    });
+    
+    Serial.println("Connecting to WiFi...");
+    if (!wm.autoConnect(hostname.c_str())) {
+        Serial.println("WiFi connection failed, restarting...");
+        delay(3000);
+        ESP.restart();
+        return false;
+    }
+    
+    Serial.println("WiFi connected!");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+    wifiStatusStr = "WiFi: " + WiFi.localIP().toString();
+    return true;
+}
+
+// ============================================
+// SETUP
+// ============================================
+void setup() {
+    Serial.begin(DEBUG_BAUD_RATE);
+    Serial.println("\n==============================");
+    Serial.println("CYD Power Monitor v" + String(FIRMWARE_VERSION));
+    Serial.println("==============================");
+    
+    // GPIO init
+    pinMode(LED_RED_PIN,   OUTPUT);
+    pinMode(LED_GREEN_PIN, OUTPUT);
+    pinMode(LED_BLUE_PIN,  OUTPUT);
+    pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+    setLED(true, false, false);  // Red = booting
+    
+    // Display
+    displayBegin();
+    uiLoadTheme();
+    Serial.println("Theme loaded: " + String(uiThemeName(currentTheme)));
+    tft.fillScreen(COLOR_BG);
+    tft.setTextColor(COLOR_CYAN);
+    tft.setTextSize(2);
+    tft.setCursor(10, 80);
+    tft.print("Iniciando...");
+    tft.setTextColor(COLOR_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(10, 110);
+    tft.print("CYD Power Monitor v" + String(FIRMWARE_VERSION));
+    
+    // Almacenamiento persistente (historial ATS)
+    if (!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS: fallo al montar/formatear - el historial no se guardara");
+        // Mostrar advertencia en pantalla
+        if (displayInitialized) {
+            tft.fillScreen(COLOR_BG);
+            tft.setTextColor(COLOR_RED);
+            tft.setTextSize(2);
+            tft.setCursor(10, 50);
+            tft.print("SPIFFS Error!");
+            tft.setTextColor(COLOR_WHITE);
+            tft.setTextSize(1);
+            tft.setCursor(10, 80);
+            tft.print("Historial no disponible");
+            delay(3000);
+        }
+    } else {
+        historyLoadFromFlash();
+    }
+    
+    // ATS
+    atsBegin();
+    
+    // PZEM
+    pzemInitialized = pzemBegin();
+    pzemStatusStr = pzemGetStatusString();
+    // Tarea dedicada en Core 0 para no bloquear la pantalla ni el webserver
+    pzemTaskBegin();
+
+    // WiFi
+    setLED(false, false, true);  // Blue = connecting
+    wifiSetup();
+    
+    // Administrador de dispositivos
+    Serial.println("Loading device manager...");
+    devicesLoad();
+    utcOffsetLoad();
+    backlightBegin();
+    devicesMutexInit();
+    deviceManagerTaskBegin();
+    if (WiFi.status() == WL_CONNECTED) {
+        ntpTimeBegin();
+    }
+    
+    // Web server + canal WebSocket V4 (si la libreria esta instalada)
+    webServerSetup();
+    webSocketBeginV4();
+    
+    setLED(false, true, false);  // Green = ready
+    
+    // Show IP on display briefly
+    tft.fillScreen(COLOR_BG);
+    tft.setTextColor(COLOR_GREEN);
+    tft.setTextSize(2);
+    tft.setCursor(10, 60);
+    tft.print("Listo!");
+    tft.setTextColor(COLOR_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(10, 90);
+    tft.print("IP: " + WiFi.localIP().toString());
+    tft.setCursor(10, 110);
+    tft.print("Dashboard: http://" + WiFi.localIP().toString());
+    delay(2000);
+    
+    Serial.println("Setup complete. Dashboard: http://" + WiFi.localIP().toString());
+}
+
+// ============================================
+// LOOP
+// ============================================
+void loop() {
+    unsigned long now = millis();
+    
+    // Handle web requests + canal de telemetria V4
+    server.handleClient();
+    webSocketTickV4();
+    
+    // Check boot button for WiFi reset
+    checkBootButton();
+    
+    // La lectura del PZEM corre en su propia tarea en Core 0 (ver pzemTaskBegin
+    // en setup). Aqui solo actualizamos el LED de estado con throttling para
+    // no flicker y para no hacer un digitalWrite en cada iteracion del loop.
+
+    // Update ATS state
+    atsUpdate();
+    
+    // Brillo automatico de pantalla segun luz ambiental (LDR)
+    if (now - brightnessLastCheck >= 800) {
+        brightnessLastCheck = now;
+        updateAutoBrightness();
+    }
+    
+    // NOTA: la automatizacion ATS, horarios y sondeo de dispositivos ya NO se
+    // llaman aqui - corren en su propia tarea en el nucleo 0 (ver
+    // deviceManagerTaskBegin() en setup()), para que nunca bloqueen la
+    // pantalla ni el servidor web de este nucleo.
+    
+    // Update LED based on ATS state (throttled a 500ms para no martillear
+    // los pines y para que los cambios de estado sean visibles a ojos)
+    static unsigned long ledLastUpdate = 0;
+    static int lastLedCode = -1;
+    if (now - ledLastUpdate >= 500) {
+        ledLastUpdate = now;
+        int code = 0; // 0=utility, 1=generator, 2=unknown/error
+        if (!pzemData.isValid) {
+            code = 2;
+        } else {
+            switch (atsState) {
+                case ATS_UTILITY_POWER:   code = 0; break;
+                case ATS_GENERATOR_POWER: code = 1; break;
+                default:                  code = 2; break;
+            }
+        }
+        if (code != lastLedCode) {
+            lastLedCode = code;
+            if (code == 0)      setLED(false, true, false);   // Green
+            else if (code == 1) setLED(false, false, true);   // Blue
+            else                setLED(true, false, false);   // Red
+        }
+    }
+    
+    // WiFi watchdog
+    if (now - wifiReconnectCheck >= 30000) {
+        wifiReconnectCheck = now;
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("WiFi lost, reconnecting...");
+            wifiStatusStr = "WiFi: Reconectando...";
+            WiFi.reconnect();
+        } else {
+            wifiStatusStr = WiFi.localIP().toString();
+            if (!ntpSynced) ntpTimeBegin();
+        }
+    }
+    
+    // Refresh TFT display
+    displayUpdate();
+    
+    // Small yield to keep WiFi stack happy
+    yield();
+}
