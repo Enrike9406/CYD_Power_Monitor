@@ -105,6 +105,87 @@ PZEM004Tv30 pzem(&Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 WebServer server(WEB_SERVER_PORT);
 WiFiManager wm;
 
+// ============================================
+// PROTOTIPOS MANUALES DE TODAS LAS FUNCIONES
+// El generador automatico de prototipos de Arduino fallo en algun punto
+// del archivo (probablemente por el JS embebido en las paginas web) y
+// dejo de declarar las funciones usadas antes de su definicion. Se
+// declaran TODAS aqui a mano para no depender de ese mecanismo.
+// ============================================
+void checkBootButton();
+void setLED(bool red, bool green, bool blue);
+void atsBegin();
+void atsUpdate();
+String atsGetStateString(ATSState state);
+unsigned long atsGetTimeInState();
+void historySaveToFlash();
+void historyLoadFromFlash();
+void atsAddHistoryEntry(ATSState newState, unsigned long duration);
+String formatRealTimestamp(unsigned long epoch);
+String buildDailyTrendChart();
+String atsGetStateName(ATSState state);
+String atsGetStateColor(ATSState state);
+String formatDuration(unsigned long seconds);
+String formatDurationLong(unsigned long seconds);
+unsigned long atsGetTotalTimeInState(ATSState targetState);
+float atsGetPercentageInState(ATSState targetState);
+int atsGetStateChangesCount(ATSState targetState);
+unsigned long atsGetAverageDuration(ATSState targetState);
+unsigned long atsGetMaxDuration(ATSState targetState);
+unsigned long atsGetMinDuration(ATSState targetState);
+bool pzemBegin();
+void pzemTaskBegin();
+String pzemGetStatusString();
+void uiResetDrawState();
+void uiText(int x, int y, const String& text, uint16_t color, uint8_t size);
+void uiClearValue(int x, int y, int w, int h, uint16_t bg);
+void displayBegin();
+void displayDrawHeader();
+void displayDrawSourceCard();
+void displayDrawMetricCards();
+void displayDrawFooter();
+void displayRenderCurrentTheme();
+void displayUpdate();
+void displayShowMessage(const String& message, int duration);
+void displayWiFiPortalInfo();
+String getMainPage();
+String getHistoryPage(String filter);
+String getOTAPage();
+String getJsonData();
+String getDevicesJsonData();
+const char* uiThemeName(uint8_t theme);
+void uiLoadTheme();
+void uiSaveTheme();
+void uiSetTheme(uint8_t theme);
+void uiNextTheme();
+String themeSourceName();
+uint16_t themeSourceColor();
+String themePower();
+String themeVoltage();
+String themeCurrent();
+String themePF();
+String themeFrequency();
+String themeEnergy();
+void themeHeader(const String& title, uint16_t bg, uint16_t accent, uint16_t text, uint16_t muted);
+void themeFooter(uint16_t bg, uint16_t muted);
+void themeDrawSCADA();
+void themeDrawMinimal();
+void themeDrawCyberpunk();
+String uiClockText();
+void themeDrawRetro();
+void themeDrawGlass();
+void displayDrawDeviceListRetro();
+void displayDrawDeviceList();
+bool checkRateLimit();
+#if CYD_V4_HAS_WEBSOCKET
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
+#endif
+void webSocketBeginV4();
+void webSocketTickV4();
+void webServerSetup();
+bool wifiSetup();
+void setup();
+void loop();
 #if CYD_V4_HAS_WEBSOCKET
 WebSocketsServer webSocket(81);
 unsigned long wsLastBroadcast = 0;
