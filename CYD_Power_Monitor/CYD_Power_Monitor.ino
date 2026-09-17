@@ -795,6 +795,7 @@ static bool uiLastPzemValid = false;
 static String uiLastPower = "";
 static String uiLastVoltage = "";
 static String uiLastCurrent = "";
+static String uiLastTimeInState = "";
 static String uiLastPF = "";
 static String uiLastFreq = "";
 static String uiLastEnergy = "";
@@ -813,6 +814,7 @@ void uiResetDrawState() {
     uiLastPower = "";
     uiLastVoltage = "";
     uiLastCurrent = "";
+    uiLastTimeInState = "";
     uiLastPF = "";
     uiLastFreq = "";
     uiLastEnergy = "";
@@ -931,6 +933,14 @@ void displayDrawSourceCard() {
         uiClearValue(x + 120, y + 42, 105, 18, UI_PANEL);
         uiText(x + 120, y + 44, a, 0xFFE0, 1);
         uiLastCurrent = a;
+    }
+
+    // Tiempo en la fuente actual, en el espacio libre a la derecha
+    String t = formatDuration(atsGetTimeInState());
+    if (t != uiLastTimeInState) {
+        uiClearValue(x + 228, y + 42, 76, 18, UI_PANEL);
+        uiText(x + 228, y + 44, t, UI_WHITE, 1);
+        uiLastTimeInState = t;
     }
 }
 
