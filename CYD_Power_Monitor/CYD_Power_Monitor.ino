@@ -176,6 +176,7 @@ void themeDrawRetro();
 void themeDrawGlass();
 void displayDrawDeviceListRetro();
 void displayDrawDeviceList();
+void displayDrawTeslaDeviceList();
 bool checkRateLimit();
 #if CYD_V4_HAS_WEBSOCKET
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
@@ -860,6 +861,147 @@ void displayBegin() {
     Serial.println("Display initialized - Tesla/App UI");
 }
 
+// ============================================================
+// TESLA / APP MODERNA - DASHBOARD ORGANIZADO 320x240
+// No elimina informacion: reorganiza todo en bloques compactos.
+// ============================================================
+
+void displayDrawHeaderTesla() {
+    const int y = 0;
+    tft.fillRect(0, y, 320, 29, UI_PANEL);
+    tft.drawFastHLine(0, 28, 320, UI_LINE);
+
+    tft.setTextSize(2);
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.setCursor(8, 6);
+    tft.print("CYD");
+    tft.setTextColor(UI_BLUE, UI_PANEL);
+    tft.print(" Power");
+
+    bool wifiOk = (WiFi.status() == WL_CONNECTED);
+    tft.fillCircle(201, 14, 4, wifiOk ? UI_GREEN : UI_RED);
+    tft.setTextSize(1);
+    tft.setTextColor(wifiOk ? UI_GREEN : UI_RED, UI_PANEL);
+    tft.setCursor(209, 10);
+    tft.print(wifiOk ? "WIFI" : "OFF");
+
+    tft.setTextSize(2);
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.setCursor(258, 6);
+    tft.print(uiClockText());
+}
+
+void displayDrawSourceCardTesla() {
+    // Bloque principal: potencia + fuente + tiempo en fuente.
+    const int x = 7, y = 34, w = 306, h = 49;
+    bool valid = pzemData.isValid;
+    String source = themeSourceName();
+    uint16_t sourceColor = themeSourceColor();
+
+    tft.fillRoundRect(x, y, w, h, 8, UI_PANEL);
+    tft.drawRoundRect(x, y, w, h, 8, UI_LINE);
+
+    // Etiqueta de fuente.
+    tft.fillRoundRect(x + 9, y + 8, 103, 16, 7, sourceColor);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_WHITE, sourceColor);
+    tft.setCursor(x + 16, y + 12);
+    tft.print(source);
+
+    // Tiempo en la fuente actual.
+    tft.setTextColor(UI_MUTED, UI_PANEL);
+    tft.setCursor(x + 9, y + 31);
+    tft.print("TIEMPO ");
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.print(formatDuration(atsGetTimeInState()));
+
+    // Potencia grande, alineada a la derecha.
+    String power = valid ? String((int)round(pzemData.power)) : "--";
+    tft.setTextSize(3);
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    int pw = power.length() * 18;
+    tft.setCursor(190 - (pw > 70 ? 0 : 0), y + 5);
+    tft.print(power);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_PANEL);
+    tft.setCursor(276, y + 17);
+    tft.print("W");
+}
+
+void displayDrawMetricCardsTesla() {
+    // Fila 1: voltaje, corriente y PZEM.
+    // Fila 2: PF, frecuencia, energia y estado WiFi.
+    const int y1 = 88;
+    const int y2 = 116;
+    const int gap = 4;
+    const int cardW = 99;
+
+    bool valid = pzemData.isValid;
+    String v = valid ? String(pzemData.voltage, 1) + " V" : "-- V";
+    String a = valid ? String(pzemData.current, 2) + " A" : "-- A";
+    String pf = valid ? String(pzemData.pf, 2) : "--";
+    String hz = valid ? String(pzemData.frequency, 1) + " Hz" : "-- Hz";
+    String kwh = valid ? String(pzemData.energy / 1000.0, 2) + " kWh" : "-- kWh";
+    String pzem = valid ? "ONLINE" : "SIN DATOS";
+    String wifi = WiFi.status() == WL_CONNECTED ? "WIFI OK" : "WIFI OFF";
+
+    // Primera fila: V / A / PZEM.
+    tft.fillRoundRect(7, y1, cardW, 23, 5, UI_PANEL);
+    tft.fillRoundRect(110, y1, cardW, 23, 5, UI_PANEL);
+    tft.fillRoundRect(213, y1, 100, 23, 5, UI_PANEL);
+
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_PANEL);
+    tft.setCursor(12, y1 + 4);  tft.print("VOLT");
+    tft.setCursor(115, y1 + 4); tft.print("AMP");
+    tft.setCursor(218, y1 + 4); tft.print("PZEM");
+
+    tft.setTextColor(0x07FF, UI_PANEL);
+    tft.setCursor(48, y1 + 4); tft.print(v);
+    tft.setTextColor(0xFFE0, UI_PANEL);
+    tft.setCursor(140, y1 + 4); tft.print(a);
+    tft.setTextColor(valid ? UI_GREEN : UI_RED, UI_PANEL);
+    tft.setCursor(245, y1 + 4); tft.print(pzem);
+
+    // Segunda fila: PF / Hz / kWh / WiFi.
+    tft.fillRoundRect(7, y2, 73, 23, 5, UI_PANEL);
+    tft.fillRoundRect(84, y2, 73, 23, 5, UI_PANEL);
+    tft.fillRoundRect(161, y2, 73, 23, 5, UI_PANEL);
+    tft.fillRoundRect(238, y2, 75, 23, 5, UI_PANEL);
+
+    tft.setTextColor(UI_MUTED, UI_PANEL);
+    tft.setCursor(12, y2 + 4);  tft.print("PF");
+    tft.setCursor(89, y2 + 4);  tft.print("FREQ");
+    tft.setCursor(166, y2 + 4); tft.print("ENERGIA");
+    tft.setCursor(243, y2 + 4); tft.print("NET");
+
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.setCursor(28, y2 + 4); tft.print(pf);
+    tft.setCursor(109, y2 + 4); tft.print(hz);
+    tft.setCursor(197, y2 + 4); tft.print(kwh);
+    tft.setTextColor(WiFi.status() == WL_CONNECTED ? UI_GREEN : UI_RED, UI_PANEL);
+    tft.setCursor(263, y2 + 4); tft.print(wifi);
+}
+
+void displayDrawFooterTesla() {
+    const int y = 225;
+    tft.fillRect(0, y, 320, 15, UI_BG);
+    tft.drawFastHLine(7, y, 306, UI_LINE);
+
+    String uptime = formatDurationLong(millis() / 1000);
+    String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "sin WiFi";
+
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setCursor(7, y + 4);
+    tft.print("UP ");
+    tft.print(uptime);
+
+    // IP siempre visible en el pie.
+    tft.setCursor(174, y + 4);
+    tft.print(ip);
+}
+
 void displayDrawHeader() {
     // Cabecera: logo + estado WiFi + hora.
     tft.fillRect(0, 0, DISPLAY_WIDTH, 34, UI_PANEL);
@@ -1047,11 +1189,11 @@ void displayRenderCurrentTheme() {
         case THEME_TESLA:
         default:
             // Tesla mantiene el motor incremental/flicker-free original.
-            displayDrawHeader();
-            displayDrawSourceCard();
-            displayDrawMetricCards();
-            displayDrawFooter();
-            displayDrawDeviceList();
+            displayDrawHeaderTesla();
+            displayDrawSourceCardTesla();
+            displayDrawMetricCardsTesla();
+            displayDrawTeslaDeviceList();
+            displayDrawFooterTesla();
             uiStaticDrawn = true;
             break;
     }
@@ -2363,6 +2505,93 @@ void displayDrawDeviceListRetro() {
 // Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
 // define AQUI, despues de device_manager.h, porque necesita el arreglo
 // devices[] y el mutex que lo protege entre nucleos.
+// Lista compacta exclusiva para Tesla/App moderna.
+// Mantiene nombre, estado, potencia, voltaje y corriente de cada equipo.
+void displayDrawTeslaDeviceList() {
+    const int startX = 7;
+    const int startY = 144;
+    const int rowH = 19;
+    const int maxRows = 4;
+
+    struct RowData {
+        String name;
+        bool state;
+        bool hasEnergy;
+        bool metricsValid;
+        float power;
+        float voltage;
+        float current;
+    };
+
+    RowData rows[maxRows];
+    int rowCount = 0;
+
+    if (devicesMutex != NULL) xSemaphoreTake(devicesMutex, portMAX_DELAY);
+    for (int i = 0; i < deviceCount && rowCount < maxRows; i++) {
+        if (devices[i].pollFailures != 0) continue;
+        rows[rowCount].name = devices[i].name;
+        rows[rowCount].state = devices[i].state;
+        rows[rowCount].hasEnergy = devices[i].hasEnergyMonitoring;
+        rows[rowCount].metricsValid = devices[i].metricsValid;
+        rows[rowCount].power = devices[i].lastPower;
+        rows[rowCount].voltage = devices[i].lastVoltage;
+        rows[rowCount].current = devices[i].lastCurrent;
+        rowCount++;
+    }
+    if (devicesMutex != NULL) xSemaphoreGive(devicesMutex);
+
+    // Encabezado de la seccion.
+    tft.fillRect(0, 140, 320, 84, UI_BG);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_MUTED, UI_BG);
+    tft.setCursor(8, 143);
+    tft.print("DISPOSITIVOS CONECTADOS");
+    tft.drawFastHLine(8, 154, 304, UI_LINE);
+
+    if (rowCount == 0) {
+        tft.setTextColor(UI_MUTED, UI_BG);
+        tft.setCursor(8, 164);
+        tft.print("Esperando dispositivos conectados...");
+        return;
+    }
+
+    for (int i = 0; i < rowCount; i++) {
+        int y = startY + i * rowH;
+        uint16_t rowBg = (i & 1) ? UI_BG : 0x1082;
+        tft.fillRect(7, y, 306, rowH - 1, rowBg);
+
+        tft.fillCircle(14, y + 9, 3, rows[i].state ? UI_GREEN : UI_ORANGE);
+
+        tft.setTextSize(1);
+        tft.setTextColor(UI_WHITE, rowBg);
+        tft.setCursor(22, y + 5);
+        String nm = rows[i].name;
+        if (nm.length() > 15) nm = nm.substring(0, 14) + ".";
+        tft.print(nm);
+
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            tft.setTextColor(UI_ORANGE, rowBg);
+            tft.setCursor(137, y + 5);
+            tft.print(String((int)round(rows[i].power)));
+            tft.print("W");
+
+            tft.setTextColor(0x07FF, rowBg);
+            tft.setCursor(188, y + 5);
+            tft.print(String(rows[i].voltage, 0));
+            tft.print("V");
+
+            tft.setTextColor(0xFFE0, rowBg);
+            tft.setCursor(232, y + 5);
+            tft.print(String(rows[i].current, 1));
+            tft.print("A");
+        }
+
+        tft.setTextColor(rows[i].state ? UI_GREEN : UI_ORANGE, rowBg);
+        tft.setCursor(278, y + 5);
+        tft.print(rows[i].state ? "ON" : "OFF");
+    }
+}
+
 #define DISPLAY_MAX_DEVICE_ROWS 5
 void displayDrawDeviceList() {
     // Solo muestra dispositivos que respondieron al ultimo sondeo.
