@@ -2551,19 +2551,19 @@ void displayDrawDeviceListMinimal() {
         tft.fillCircle(startX + 5, y + 5, 3, rows[i].state ? UI_GREEN : UI_ORANGE);
 
         tft.setTextSize(1);
-        tft.setTextColor(UI_TEXT, rowBg);
+        tft.setTextColor(0xFFFF, rowBg);
         tft.setCursor(startX + 13, y + 2);
         String nm = rows[i].name;
         if (nm.length() > 15) nm = nm.substring(0, 14) + ".";
         tft.print(nm);
 
         if (rows[i].hasEnergy && rows[i].metricsValid) {
-            tft.setTextColor(UI_YELLOW, rowBg);
+            tft.setTextColor(0xFFE0, rowBg);
             tft.setCursor(183, y + 2);
             tft.print(String((int)round(rows[i].power)));
             tft.print("W");
 
-            tft.setTextColor(UI_CYAN, rowBg);
+            tft.setTextColor(0x07FF, rowBg);
             tft.setCursor(225, y + 2);
             tft.print(String(rows[i].voltage, 0));
             tft.print("V");
