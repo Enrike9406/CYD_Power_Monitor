@@ -375,15 +375,22 @@ void atsUpdate() {
     ATSState newState = (highCount >= 2) ? ATS_UTILITY_POWER : ATS_GENERATOR_POWER;
     
     if (newState != atsState) {
+        // Lectura tentativa distinta - aun no se confirma. NO se toca
+        // atsLastStateChange aqui (eso reiniciaba el reloj del estado
+        // confirmado en cada parpadeo de la señal, dejando la duracion
+        // calculada mas abajo casi siempre en 0).
         atsState = newState;
         atsLastDebounce = now;
         atsStableCounter = 0;
-        atsLastStateChange = now; // Update timestamp on every actual state change
     } else {
         atsStableCounter++;
         if (atsStableCounter >= ATS_STABLE_COUNT && atsState != atsLastState) {
             unsigned long duration = (now - atsLastStateChange) / 1000;
-            atsAddHistoryEntry(atsState, duration);
+            // 'duration' mide cuanto duro atsLastState (el que se esta
+            // dejando), asi que se guarda junto a ESE estado - no al nuevo
+            // atsState. Antes quedaban cruzados: la duracion del generador
+            // se guardaba etiquetada como "red" y viceversa.
+            atsAddHistoryEntry(atsLastState, duration);
             atsLastState = atsState;
             atsLastStateChange = now;
             Serial.print("ATS changed to: ");
@@ -866,11 +873,7 @@ void displayDrawHeader() {
     tft.print(" Power");
 
     bool wifiOk = (WiFi.status() == WL_CONNECTED);
-    tft.fillCircle(257, 12, 5, wifiOk ? UI_GREEN : UI_RED);
-    tft.setTextSize(1);
-    tft.setTextColor(wifiOk ? UI_GREEN : UI_RED, UI_PANEL);
-    tft.setCursor(267, 8);
-    tft.print(wifiOk ? "ONLINE" : "OFFLINE");
+    tft.fillCircle(308, 17, 5, wifiOk ? UI_GREEN : UI_RED);
 
     time_t nowEpoch = time(nullptr);
     char timeBuf[8] = "--:--";
@@ -879,8 +882,9 @@ void displayDrawHeader() {
         localtime_r(&nowEpoch, &ti);
         strftime(timeBuf, sizeof(timeBuf), "%H:%M", &ti);
     }
-    tft.setTextColor(UI_MUTED, UI_PANEL);
-    tft.setCursor(268, 20);
+    tft.setTextSize(2);
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.setCursor(232, 8);
     tft.print(timeBuf);
 }
 
