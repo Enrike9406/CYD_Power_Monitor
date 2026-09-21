@@ -233,6 +233,15 @@ bool bootResetActive = false;
 bool pzemInitialized = false;
 bool displayInitialized = false;
 
+// OTA TFT animation state. The normal dashboard is suspended while an OTA
+// upload is active so the TFT becomes a dedicated, animated update screen.
+volatile bool otaDisplayActive = false;
+unsigned long otaExpectedSize = 0;
+unsigned long otaReceivedSize = 0;
+unsigned long otaDisplayLastDraw = 0;
+int otaSpinnerFrame = 0;
+String otaDisplayFilename = "";
+
 // ATS History storage (circular buffer)
 ATSHistoryEntry atsHistory[MAX_HISTORY_ENTRIES];
 int historyIndex = 0;
@@ -1085,7 +1094,7 @@ void displayRenderCurrentTheme() {
 }
 
 void displayUpdate() {
-    if (!displayInitialized) return;
+    if (!displayInitialized || otaDisplayActive) return;
 
     unsigned long now = millis();
     if (now - displayLastUpdate < DISPLAY_UPDATE_INTERVAL) return;
@@ -1093,6 +1102,171 @@ void displayUpdate() {
 
     displayRenderCurrentTheme();
 }
+// ============================================
+// OTA TFT - Animated firmware update screen
+// ============================================
+void otaDisplayBegin(const String& filename, unsigned long expectedSize) {
+    if (!displayInitialized) return;
+
+    otaDisplayActive = true;
+    otaExpectedSize = expectedSize;
+    otaReceivedSize = 0;
+    otaDisplayLastDraw = 0;
+    otaSpinnerFrame = 0;
+    otaDisplayFilename = filename;
+
+    tft.fillScreen(COLOR_BG);
+    tft.setTextWrap(false);
+
+    // Header
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_WHITE, COLOR_BG);
+    tft.setCursor(12, 10);
+    tft.print("CYD POWER");
+    tft.setTextColor(COLOR_CYAN, COLOR_BG);
+    tft.setCursor(224, 10);
+    tft.print("OTA");
+    tft.drawFastHLine(10, 35, 300, COLOR_BORDER);
+
+    // Central title
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(116, 50);
+    tft.print("ACTUALIZANDO FIRMWARE");
+
+    // Static progress frame
+    tft.drawRoundRect(18, 150, 284, 20, 6, COLOR_BORDER);
+    tft.fillRoundRect(21, 153, 278, 14, 4, COLOR_BG_ALT);
+
+    // Bottom warning
+    tft.setTextColor(COLOR_ORANGE, COLOR_BG);
+    tft.setCursor(83, 202);
+    tft.print("NO APAGAR EL EQUIPO");
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(84, 218);
+    tft.print("Actualizacion OTA en curso");
+
+    // Filename, trimmed to fit.
+    String shortName = filename;
+    if (shortName.length() > 30) shortName = shortName.substring(shortName.length() - 30);
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(10, 184);
+    tft.print(shortName);
+
+    otaDisplayUpdate(0);
+}
+
+void otaDisplayUpdate(unsigned long receivedSize) {
+    if (!displayInitialized || !otaDisplayActive) return;
+
+    otaReceivedSize = receivedSize;
+    unsigned long now = millis();
+    if (now - otaDisplayLastDraw < 45 && receivedSize != 0) return;
+    otaDisplayLastDraw = now;
+
+    // Percentage is exact when the browser supplied the .bin size.
+    unsigned long pct = 0;
+    if (otaExpectedSize > 0) {
+        pct = (otaReceivedSize >= otaExpectedSize) ? 100UL :
+              (otaReceivedSize * 100UL) / otaExpectedSize;
+    }
+
+    // Progress bar: only this small region is redrawn.
+    tft.fillRoundRect(21, 153, 278, 14, 4, COLOR_BG_ALT);
+    int fillW = (int)((278UL * pct) / 100UL);
+    if (fillW > 0) {
+        tft.fillRoundRect(21, 153, fillW, 14, 4, COLOR_CYAN);
+        // Moving highlight gives the bar a polished live effect.
+        int glowX = 22 + ((otaSpinnerFrame * 6) % max(1, fillW));
+        if (fillW > 8) {
+            tft.fillRect(glowX, 154, min(7, fillW - (glowX - 21)), 12, COLOR_WHITE);
+        }
+    }
+
+    // Large percentage, centered.
+    tft.fillRect(90, 76, 140, 55, COLOR_BG);
+    tft.setTextSize(4);
+    tft.setTextColor(COLOR_WHITE, COLOR_BG);
+    String pctText = String((int)pct) + "%";
+    int px = 160 - ((int)pctText.length() * 12);
+    tft.setCursor(px, 80);
+    tft.print(pctText);
+
+    // Animated spinner / pulse around the percentage.
+    const int cx = 62;
+    const int cy = 102;
+    for (int i = 0; i < 8; i++) {
+        float a = (float)i * 0.785398f;
+        int x = cx + (int)(18.0f * cos(a));
+        int y = cy + (int)(18.0f * sin(a));
+        uint16_t c = (i == otaSpinnerFrame % 8) ? COLOR_WHITE : COLOR_CYAN;
+        tft.fillCircle(x, y, (i == otaSpinnerFrame % 8) ? 3 : 2, c);
+    }
+    otaSpinnerFrame++;
+
+    // Byte counter.
+    tft.fillRect(8, 172, 304, 11, COLOR_BG);
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(8, 174);
+    tft.print(String(otaReceivedSize / 1024));
+    tft.print(" KB");
+    if (otaExpectedSize > 0) {
+        tft.print(" / ");
+        tft.print(String(otaExpectedSize / 1024));
+        tft.print(" KB");
+    }
+    tft.setCursor(254, 174);
+    tft.setTextColor(COLOR_CYAN, COLOR_BG);
+    tft.print("LIVE");
+}
+
+void otaDisplayComplete(bool success) {
+    if (!displayInitialized) return;
+
+    otaDisplayActive = false;
+    tft.fillScreen(COLOR_BG);
+
+    if (success) {
+        // Animated-looking completion card.
+        tft.drawRoundRect(20, 38, 280, 158, 12, COLOR_GREEN);
+        tft.fillCircle(160, 78, 22, COLOR_GREEN);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_BG, COLOR_GREEN);
+        tft.setCursor(151, 68);
+        tft.print("OK");
+
+        tft.setTextColor(COLOR_GREEN, COLOR_BG);
+        tft.setCursor(77, 112);
+        tft.print("ACTUALIZACION LISTA");
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE, COLOR_BG);
+        tft.setCursor(88, 142);
+        tft.print("El equipo se reiniciara...");
+        tft.setTextColor(COLOR_MUTED, COLOR_BG);
+        tft.setCursor(108, 162);
+        tft.print("Por favor espera");
+    } else {
+        tft.drawRoundRect(20, 38, 280, 158, 12, COLOR_RED);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_RED, COLOR_BG);
+        tft.setCursor(111, 76);
+        tft.print("ERROR OTA");
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE, COLOR_BG);
+        tft.setCursor(70, 118);
+        tft.print("No se pudo completar la");
+        tft.setCursor(94, 134);
+        tft.print("actualizacion.");
+        tft.setTextColor(COLOR_MUTED, COLOR_BG);
+        tft.setCursor(71, 166);
+        tft.print("Revisa el archivo .bin");
+    }
+
+    delay(700);
+    uiResetDrawState();
+}
+
 void displayShowMessage(const String& message, int duration) {
     if (!displayInitialized) return;
 
@@ -1792,7 +1966,7 @@ const statusMsg = document.getElementById('statusMsg');
 const fileInfo = document.getElementById('fileInfo');
 const dropZone = document.getElementById('dropZone');
 
-firmware.addEventListener('change', function() {
+firmware.addEventListener('change', () => {
   if (this.files.length > 0) {
     const f = this.files[0];
     document.getElementById('fileName').textContent = '📄 ' + f.name;
@@ -1803,14 +1977,14 @@ firmware.addEventListener('change', function() {
   }
 });
 
-dropZone.addEventListener('dragover', function(e) {
+dropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
   this.classList.add('dragover');
 });
-dropZone.addEventListener('dragleave', function() {
+dropZone.addEventListener('dragleave', () => {
   this.classList.remove('dragover');
 });
-dropZone.addEventListener('drop', function(e) {
+dropZone.addEventListener('drop', (e) => {
   e.preventDefault();
   this.classList.remove('dragover');
   const files = e.dataTransfer.files;
@@ -1847,9 +2021,9 @@ const startUpload=()=>{
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/update?key=)rawliteral");
     page += OTA_API_KEY;
-    page += F(R"rawliteral(', true);
+    page += F(R"rawliteral('&size=' + encodeURIComponent(file.size), true);
 
-  xhr.upload.onprogress = function(e) {
+  xhr.upload.onprogress = (e) => {
     if (e.lengthComputable) {
       const pct = Math.round((e.loaded / e.total) * 100);
       progressFill.style.width = pct + '%';
@@ -1857,19 +2031,19 @@ const startUpload=()=>{
     }
   };
 
-  xhr.onload = function() {
+  xhr.onload = () => {
     if (xhr.status === 200) {
       progressFill.style.width = '100%';
       progressText.textContent = '✅ Completado';
       showStatus('✅ Firmware actualizado correctamente. El dispositivo se reiniciará en 3 segundos...', 'success');
-      setTimeout(function() { window.location = '/'; }, 5000);
+      setTimeout(() => { window.location = '/'; }, 5000);
     } else {
       showStatus('❌ Error al actualizar: ' + xhr.responseText, 'error');
       uploadBtn.disabled = false;
     }
   };
 
-  xhr.onerror = function() {
+  xhr.onerror = () => {
     showStatus('❌ Error de conexión durante la actualización.', 'error');
     uploadBtn.disabled = false;
   };
@@ -1881,13 +2055,13 @@ const rebootDevice=()=>{
   if (confirm('¿Confirmas que deseas reiniciar el dispositivo?')) {
     showStatus('🔄 Enviando comando de reinicio...', 'info');
     fetch('/reboot', { method: 'POST' })
-      .then(function() {
+      .then(() => {
         showStatus('✅ Reiniciando... Serás redirigido al Dashboard en 8 segundos.', 'success');
-        setTimeout(function() { window.location = '/'; }, 8000);
+        setTimeout(() => { window.location = '/'; }, 8000);
       })
-      .catch(function() {
+      .catch(() => {
         showStatus('✅ Reiniciando... (sin respuesta esperada)', 'success');
-        setTimeout(function() { window.location = '/'; }, 8000);
+        setTimeout(() => { window.location = '/'; }, 8000);
       });
   }
 }
@@ -2665,7 +2839,7 @@ void displayDrawDeviceListMinimal() {
 // datos: una linea luminosa recorre el borde superior de la tarjeta de
 // potencia, dando sensacion de equipo vivo sin introducir parpadeo.
 void minimalAnimationTick() {
-    if (!displayInitialized || currentTheme != THEME_MINIMAL || !themeStaticDrawn) return;
+    if (!displayInitialized || otaDisplayActive || currentTheme != THEME_MINIMAL || !themeStaticDrawn) return;
 
     unsigned long now = millis();
     if (now - minimalAnimLastMs < 70) return;
@@ -3018,6 +3192,9 @@ void webServerSetup() {
             if (upload.status == UPLOAD_FILE_START) {
                 Serial.printf("OTA Start: %s\n", upload.filename.c_str());
                 setLED(false, false, true);  // Blue = uploading
+                unsigned long expected = 0;
+                if (server.hasArg("size")) expected = server.arg("size").toInt();
+                otaDisplayBegin(upload.filename, expected);
                 if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                     Update.printError(Serial);
                 }
@@ -3025,35 +3202,17 @@ void webServerSetup() {
                 if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
                     Update.printError(Serial);
                 }
-                // Show progress on TFT
-                if (displayInitialized) {
-                    unsigned long pct = (upload.totalSize > 0)
-                        ? (upload.currentSize * 100 / upload.totalSize) : 0;
-                    tft.fillRect(10, 110, 300, 20, 0x18C3);
-                    tft.fillRect(10, 110, (300 * pct) / 100, 20, COLOR_CYAN);
-                    tft.setTextColor(COLOR_WHITE);
-                    tft.setTextSize(1);
-                    tft.setCursor(10, 113);
-                    tft.printf("OTA: %lu%%  %lu bytes", pct, upload.totalSize);
-                }
+                otaDisplayUpdate(upload.totalSize);
             } else if (upload.status == UPLOAD_FILE_END) {
                 if (Update.end(true)) {
                     Serial.printf("OTA Success: %u bytes\n", upload.totalSize);
                     setLED(false, true, false);  // Green = success
-                    if (displayInitialized) {
-                        tft.fillScreen(COLOR_BG);
-                        tft.setTextColor(COLOR_GREEN);
-                        tft.setTextSize(2);
-                        tft.setCursor(20, 80);
-                        tft.print("OTA exitoso!");
-                        tft.setTextColor(COLOR_WHITE);
-                        tft.setTextSize(1);
-                        tft.setCursor(20, 110);
-                        tft.print("Reiniciando...");
-                    }
+                    otaDisplayUpdate(upload.totalSize);
+                    otaDisplayComplete(true);
                 } else {
                     Update.printError(Serial);
                     setLED(true, false, false);  // Red = error
+                    otaDisplayComplete(false);
                 }
             }
         }
