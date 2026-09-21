@@ -175,6 +175,7 @@ String uiClockText();
 void themeDrawRetro();
 void themeDrawGlass();
 void displayDrawDeviceListRetro();
+void displayDrawDeviceListMinimal();
 void displayDrawDeviceList();
 bool checkRateLimit();
 #if CYD_V4_HAS_WEBSOCKET
@@ -231,6 +232,15 @@ bool bootResetActive = false;
 
 bool pzemInitialized = false;
 bool displayInitialized = false;
+
+// OTA TFT animation state. The normal dashboard is suspended while an OTA
+// upload is active so the TFT becomes a dedicated, animated update screen.
+volatile bool otaDisplayActive = false;
+unsigned long otaExpectedSize = 0;
+unsigned long otaReceivedSize = 0;
+unsigned long otaDisplayLastDraw = 0;
+int otaSpinnerFrame = 0;
+String otaDisplayFilename = "";
 
 // ATS History storage (circular buffer)
 ATSHistoryEntry atsHistory[MAX_HISTORY_ENTRIES];
@@ -375,15 +385,22 @@ void atsUpdate() {
     ATSState newState = (highCount >= 2) ? ATS_UTILITY_POWER : ATS_GENERATOR_POWER;
     
     if (newState != atsState) {
+        // Lectura tentativa distinta - aun no se confirma. NO se toca
+        // atsLastStateChange aqui (eso reiniciaba el reloj del estado
+        // confirmado en cada parpadeo de la señal, dejando la duracion
+        // calculada mas abajo casi siempre en 0).
         atsState = newState;
         atsLastDebounce = now;
         atsStableCounter = 0;
-        atsLastStateChange = now; // Update timestamp on every actual state change
     } else {
         atsStableCounter++;
         if (atsStableCounter >= ATS_STABLE_COUNT && atsState != atsLastState) {
             unsigned long duration = (now - atsLastStateChange) / 1000;
-            atsAddHistoryEntry(atsState, duration);
+            // 'duration' mide cuanto duro atsLastState (el que se esta
+            // dejando), asi que se guarda junto a ESE estado - no al nuevo
+            // atsState. Antes quedaban cruzados: la duracion del generador
+            // se guardaba etiquetada como "red" y viceversa.
+            atsAddHistoryEntry(atsLastState, duration);
             atsLastState = atsState;
             atsLastStateChange = now;
             Serial.print("ATS changed to: ");
@@ -795,6 +812,7 @@ static bool uiLastPzemValid = false;
 static String uiLastPower = "";
 static String uiLastVoltage = "";
 static String uiLastCurrent = "";
+static String uiLastTimeInState = "";
 static String uiLastPF = "";
 static String uiLastFreq = "";
 static String uiLastEnergy = "";
@@ -802,6 +820,19 @@ static String uiLastUptime = "";
 static String uiLastWifi = "";
 static String uiLastIp = "";
 static String uiLastDeviceSignature = "";
+static String uiLastMinimalClock = "";
+static String uiLastMinimalSource = "";
+static String uiLastMinimalPower = "";
+static String uiLastMinimalVoltage = "";
+static String uiLastMinimalCurrent = "";
+static String uiLastMinimalFreq = "";
+static String uiLastMinimalTime = "";
+static String uiLastMinimalWifi = "";
+static String uiLastMinimalIp = "";
+static String uiLastMinimalDevices = "";
+static unsigned long minimalAnimLastMs = 0;
+static int minimalAnimX = 8;
+static bool minimalAnimInitialized = false;
 
 void uiResetDrawState() {
     uiStaticDrawn = false;
@@ -813,6 +844,7 @@ void uiResetDrawState() {
     uiLastPower = "";
     uiLastVoltage = "";
     uiLastCurrent = "";
+    uiLastTimeInState = "";
     uiLastPF = "";
     uiLastFreq = "";
     uiLastEnergy = "";
@@ -820,6 +852,19 @@ void uiResetDrawState() {
     uiLastWifi = "";
     uiLastIp = "";
     uiLastDeviceSignature = "";
+    uiLastMinimalClock = "";
+    uiLastMinimalSource = "";
+    uiLastMinimalPower = "";
+    uiLastMinimalVoltage = "";
+    uiLastMinimalCurrent = "";
+    uiLastMinimalFreq = "";
+    uiLastMinimalTime = "";
+    uiLastMinimalWifi = "";
+    uiLastMinimalIp = "";
+    uiLastMinimalDevices = "";
+    minimalAnimLastMs = 0;
+    minimalAnimX = 8;
+    minimalAnimInitialized = false;
 }
 
 void uiText(int x, int y, const String& text, uint16_t color, uint8_t size = 1) {
@@ -864,11 +909,7 @@ void displayDrawHeader() {
     tft.print(" Power");
 
     bool wifiOk = (WiFi.status() == WL_CONNECTED);
-    tft.fillCircle(257, 12, 5, wifiOk ? UI_GREEN : UI_RED);
-    tft.setTextSize(1);
-    tft.setTextColor(wifiOk ? UI_GREEN : UI_RED, UI_PANEL);
-    tft.setCursor(267, 8);
-    tft.print(wifiOk ? "ONLINE" : "OFFLINE");
+    tft.fillCircle(308, 17, 5, wifiOk ? UI_GREEN : UI_RED);
 
     time_t nowEpoch = time(nullptr);
     char timeBuf[8] = "--:--";
@@ -877,8 +918,9 @@ void displayDrawHeader() {
         localtime_r(&nowEpoch, &ti);
         strftime(timeBuf, sizeof(timeBuf), "%H:%M", &ti);
     }
-    tft.setTextColor(UI_MUTED, UI_PANEL);
-    tft.setCursor(268, 20);
+    tft.setTextSize(2);
+    tft.setTextColor(UI_WHITE, UI_PANEL);
+    tft.setCursor(232, 8);
     tft.print(timeBuf);
 }
 
@@ -931,6 +973,14 @@ void displayDrawSourceCard() {
         uiClearValue(x + 120, y + 42, 105, 18, UI_PANEL);
         uiText(x + 120, y + 44, a, 0xFFE0, 1);
         uiLastCurrent = a;
+    }
+
+    // Tiempo en la fuente actual, en el espacio libre a la derecha
+    String t = formatDuration(atsGetTimeInState());
+    if (t != uiLastTimeInState) {
+        uiClearValue(x + 228, y + 42, 76, 18, UI_PANEL);
+        uiText(x + 228, y + 44, t, UI_WHITE, 1);
+        uiLastTimeInState = t;
     }
 }
 
@@ -1044,7 +1094,7 @@ void displayRenderCurrentTheme() {
 }
 
 void displayUpdate() {
-    if (!displayInitialized) return;
+    if (!displayInitialized || otaDisplayActive) return;
 
     unsigned long now = millis();
     if (now - displayLastUpdate < DISPLAY_UPDATE_INTERVAL) return;
@@ -1052,6 +1102,171 @@ void displayUpdate() {
 
     displayRenderCurrentTheme();
 }
+// ============================================
+// OTA TFT - Animated firmware update screen
+// ============================================
+void otaDisplayBegin(const String& filename, unsigned long expectedSize) {
+    if (!displayInitialized) return;
+
+    otaDisplayActive = true;
+    otaExpectedSize = expectedSize;
+    otaReceivedSize = 0;
+    otaDisplayLastDraw = 0;
+    otaSpinnerFrame = 0;
+    otaDisplayFilename = filename;
+
+    tft.fillScreen(COLOR_BG);
+    tft.setTextWrap(false);
+
+    // Header
+    tft.setTextSize(2);
+    tft.setTextColor(COLOR_WHITE, COLOR_BG);
+    tft.setCursor(12, 10);
+    tft.print("CYD POWER");
+    tft.setTextColor(COLOR_CYAN, COLOR_BG);
+    tft.setCursor(224, 10);
+    tft.print("OTA");
+    tft.drawFastHLine(10, 35, 300, COLOR_BORDER);
+
+    // Central title
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(116, 50);
+    tft.print("ACTUALIZANDO FIRMWARE");
+
+    // Static progress frame
+    tft.drawRoundRect(18, 150, 284, 20, 6, COLOR_BORDER);
+    tft.fillRoundRect(21, 153, 278, 14, 4, COLOR_BG_ALT);
+
+    // Bottom warning
+    tft.setTextColor(COLOR_ORANGE, COLOR_BG);
+    tft.setCursor(83, 202);
+    tft.print("NO APAGAR EL EQUIPO");
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(84, 218);
+    tft.print("Actualizacion OTA en curso");
+
+    // Filename, trimmed to fit.
+    String shortName = filename;
+    if (shortName.length() > 30) shortName = shortName.substring(shortName.length() - 30);
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(10, 184);
+    tft.print(shortName);
+
+    otaDisplayUpdate(0);
+}
+
+void otaDisplayUpdate(unsigned long receivedSize) {
+    if (!displayInitialized || !otaDisplayActive) return;
+
+    otaReceivedSize = receivedSize;
+    unsigned long now = millis();
+    if (now - otaDisplayLastDraw < 45 && receivedSize != 0) return;
+    otaDisplayLastDraw = now;
+
+    // Percentage is exact when the browser supplied the .bin size.
+    unsigned long pct = 0;
+    if (otaExpectedSize > 0) {
+        pct = (otaReceivedSize >= otaExpectedSize) ? 100UL :
+              (otaReceivedSize * 100UL) / otaExpectedSize;
+    }
+
+    // Progress bar: only this small region is redrawn.
+    tft.fillRoundRect(21, 153, 278, 14, 4, COLOR_BG_ALT);
+    int fillW = (int)((278UL * pct) / 100UL);
+    if (fillW > 0) {
+        tft.fillRoundRect(21, 153, fillW, 14, 4, COLOR_CYAN);
+        // Moving highlight gives the bar a polished live effect.
+        int glowX = 22 + ((otaSpinnerFrame * 6) % max(1, fillW));
+        if (fillW > 8) {
+            tft.fillRect(glowX, 154, min(7, fillW - (glowX - 21)), 12, COLOR_WHITE);
+        }
+    }
+
+    // Large percentage, centered.
+    tft.fillRect(90, 76, 140, 55, COLOR_BG);
+    tft.setTextSize(4);
+    tft.setTextColor(COLOR_WHITE, COLOR_BG);
+    String pctText = String((int)pct) + "%";
+    int px = 160 - ((int)pctText.length() * 12);
+    tft.setCursor(px, 80);
+    tft.print(pctText);
+
+    // Animated spinner / pulse around the percentage.
+    const int cx = 62;
+    const int cy = 102;
+    for (int i = 0; i < 8; i++) {
+        float a = (float)i * 0.785398f;
+        int x = cx + (int)(18.0f * cos(a));
+        int y = cy + (int)(18.0f * sin(a));
+        uint16_t c = (i == otaSpinnerFrame % 8) ? COLOR_WHITE : COLOR_CYAN;
+        tft.fillCircle(x, y, (i == otaSpinnerFrame % 8) ? 3 : 2, c);
+    }
+    otaSpinnerFrame++;
+
+    // Byte counter.
+    tft.fillRect(8, 172, 304, 11, COLOR_BG);
+    tft.setTextSize(1);
+    tft.setTextColor(COLOR_MUTED, COLOR_BG);
+    tft.setCursor(8, 174);
+    tft.print(String(otaReceivedSize / 1024));
+    tft.print(" KB");
+    if (otaExpectedSize > 0) {
+        tft.print(" / ");
+        tft.print(String(otaExpectedSize / 1024));
+        tft.print(" KB");
+    }
+    tft.setCursor(254, 174);
+    tft.setTextColor(COLOR_CYAN, COLOR_BG);
+    tft.print("LIVE");
+}
+
+void otaDisplayComplete(bool success) {
+    if (!displayInitialized) return;
+
+    otaDisplayActive = false;
+    tft.fillScreen(COLOR_BG);
+
+    if (success) {
+        // Animated-looking completion card.
+        tft.drawRoundRect(20, 38, 280, 158, 12, COLOR_GREEN);
+        tft.fillCircle(160, 78, 22, COLOR_GREEN);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_BG, COLOR_GREEN);
+        tft.setCursor(151, 68);
+        tft.print("OK");
+
+        tft.setTextColor(COLOR_GREEN, COLOR_BG);
+        tft.setCursor(77, 112);
+        tft.print("ACTUALIZACION LISTA");
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE, COLOR_BG);
+        tft.setCursor(88, 142);
+        tft.print("El equipo se reiniciara...");
+        tft.setTextColor(COLOR_MUTED, COLOR_BG);
+        tft.setCursor(108, 162);
+        tft.print("Por favor espera");
+    } else {
+        tft.drawRoundRect(20, 38, 280, 158, 12, COLOR_RED);
+        tft.setTextSize(2);
+        tft.setTextColor(COLOR_RED, COLOR_BG);
+        tft.setCursor(111, 76);
+        tft.print("ERROR OTA");
+        tft.setTextSize(1);
+        tft.setTextColor(COLOR_WHITE, COLOR_BG);
+        tft.setCursor(70, 118);
+        tft.print("No se pudo completar la");
+        tft.setCursor(94, 134);
+        tft.print("actualizacion.");
+        tft.setTextColor(COLOR_MUTED, COLOR_BG);
+        tft.setCursor(71, 166);
+        tft.print("Revisa el archivo .bin");
+    }
+
+    delay(700);
+    uiResetDrawState();
+}
+
 void displayShowMessage(const String& message, int duration) {
     if (!displayInitialized) return;
 
@@ -1751,7 +1966,7 @@ const statusMsg = document.getElementById('statusMsg');
 const fileInfo = document.getElementById('fileInfo');
 const dropZone = document.getElementById('dropZone');
 
-firmware.addEventListener('change', function() {
+firmware.addEventListener('change', () => {
   if (this.files.length > 0) {
     const f = this.files[0];
     document.getElementById('fileName').textContent = '📄 ' + f.name;
@@ -1762,14 +1977,14 @@ firmware.addEventListener('change', function() {
   }
 });
 
-dropZone.addEventListener('dragover', function(e) {
+dropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
   this.classList.add('dragover');
 });
-dropZone.addEventListener('dragleave', function() {
+dropZone.addEventListener('dragleave', () => {
   this.classList.remove('dragover');
 });
-dropZone.addEventListener('drop', function(e) {
+dropZone.addEventListener('drop', (e) => {
   e.preventDefault();
   this.classList.remove('dragover');
   const files = e.dataTransfer.files;
@@ -1806,9 +2021,9 @@ const startUpload=()=>{
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/update?key=)rawliteral");
     page += OTA_API_KEY;
-    page += F(R"rawliteral(', true);
+    page += F(R"rawliteral('&size=' + encodeURIComponent(file.size), true);
 
-  xhr.upload.onprogress = function(e) {
+  xhr.upload.onprogress = (e) => {
     if (e.lengthComputable) {
       const pct = Math.round((e.loaded / e.total) * 100);
       progressFill.style.width = pct + '%';
@@ -1816,19 +2031,19 @@ const startUpload=()=>{
     }
   };
 
-  xhr.onload = function() {
+  xhr.onload = () => {
     if (xhr.status === 200) {
       progressFill.style.width = '100%';
       progressText.textContent = '✅ Completado';
       showStatus('✅ Firmware actualizado correctamente. El dispositivo se reiniciará en 3 segundos...', 'success');
-      setTimeout(function() { window.location = '/'; }, 5000);
+      setTimeout(() => { window.location = '/'; }, 5000);
     } else {
       showStatus('❌ Error al actualizar: ' + xhr.responseText, 'error');
       uploadBtn.disabled = false;
     }
   };
 
-  xhr.onerror = function() {
+  xhr.onerror = () => {
     showStatus('❌ Error de conexión durante la actualización.', 'error');
     uploadBtn.disabled = false;
   };
@@ -1840,13 +2055,13 @@ const rebootDevice=()=>{
   if (confirm('¿Confirmas que deseas reiniciar el dispositivo?')) {
     showStatus('🔄 Enviando comando de reinicio...', 'info');
     fetch('/reboot', { method: 'POST' })
-      .then(function() {
+      .then(() => {
         showStatus('✅ Reiniciando... Serás redirigido al Dashboard en 8 segundos.', 'success');
-        setTimeout(function() { window.location = '/'; }, 8000);
+        setTimeout(() => { window.location = '/'; }, 8000);
       })
-      .catch(function() {
+      .catch(() => {
         showStatus('✅ Reiniciando... (sin respuesta esperada)', 'success');
-        setTimeout(function() { window.location = '/'; }, 8000);
+        setTimeout(() => { window.location = '/'; }, 8000);
       });
   }
 }
@@ -2131,8 +2346,188 @@ void themeDrawSCADA() {
     themeDrawBase("SCADA POWER", 0x0000, 0x18C3, 0xFFFF, 0xBDF7, 0x07E0);
 }
 
+String uiClock12Text() {
+    struct tm ti;
+    if (!getLocalTime(&ti, 10)) return "--:--";
+    char buf[10];
+    strftime(buf, sizeof(buf), "%I:%M %p", &ti);
+    String out = String(buf);
+    if (out.length() > 0 && out[0] == '0') out.remove(0, 1);
+    return out;
+}
+
 void themeDrawMinimal() {
-    themeDrawBase("CYD POWER", 0x0000, 0x0841, 0xFFFF, 0xBDF7, 0x07FF);
+    // ------------------------------------------------------------
+    // MINIMALISTA - CYD POWER
+    // Render incremental: nunca redibuja toda la pantalla durante una
+    // actualizacion normal. Esto elimina el parpadeo visible del TFT.
+    // ------------------------------------------------------------
+    const uint16_t bg = 0x0000;
+    const uint16_t panel = 0x0841;
+    const uint16_t text = 0xFFFF;
+    const uint16_t muted = 0xBDF7;
+    const uint16_t cyan = 0x07FF;
+    const uint16_t green = 0x07E0;
+    const uint16_t orange = 0xFD20;
+    const uint16_t red = 0xF800;
+    const uint16_t yellow = 0xFFE0;
+
+    if (!themeStaticDrawn) {
+        tft.fillScreen(bg);
+
+        // HEADER: titulo + hora 12 h + indicador WiFi.
+        tft.fillRect(0, 0, 320, 30, bg);
+        tft.drawFastHLine(0, 29, 320, cyan);
+        tft.setTextSize(2);
+        tft.setTextColor(text, bg);
+        tft.setCursor(7, 5);
+        tft.print("CYD POWER");
+
+        // Tarjeta principal de potencia.
+        tft.fillRoundRect(6, 36, 308, 64, 8, panel);
+        tft.drawRoundRect(6, 36, 308, 64, 8, cyan);
+        tft.setTextSize(1);
+        tft.setTextColor(muted, panel);
+        tft.setCursor(15, 44);
+        tft.print("POTENCIA ACTIVA");
+
+        // Fuente + tiempo dentro de la misma tarjeta.
+        tft.setTextColor(muted, panel);
+        tft.setCursor(207, 44);
+        tft.print("FUENTE");
+        tft.setCursor(207, 70);
+        tft.print("TIEMPO");
+
+        // Tres tarjetas electricas.
+        const int cardY = 106;
+        const int cardW = 98;
+        const int cardH = 35;
+        tft.fillRoundRect(6, cardY, cardW, cardH, 6, panel);
+        tft.fillRoundRect(111, cardY, cardW, cardH, 6, panel);
+        tft.fillRoundRect(216, cardY, cardW, cardH, 6, panel);
+        tft.drawRoundRect(6, cardY, cardW, cardH, 6, cyan);
+        tft.drawRoundRect(111, cardY, cardW, cardH, 6, cyan);
+        tft.drawRoundRect(216, cardY, cardW, cardH, 6, cyan);
+
+        tft.setTextSize(1);
+        tft.setTextColor(muted, panel);
+        tft.setCursor(13, 113);  tft.print("VOLTAJE");
+        tft.setCursor(118, 113); tft.print("CORRIENTE");
+        tft.setCursor(223, 113); tft.print("FRECUENCIA");
+
+        // Dispositivos.
+        tft.setTextColor(text, bg);
+        tft.setCursor(8, 147);
+        tft.print("DISPOSITIVOS CONECTADOS");
+        tft.drawFastHLine(8, 156, 304, 0x18C3);
+
+        // Pie.
+        tft.drawFastHLine(0, 228, 320, 0x18C3);
+        tft.setTextColor(muted, bg);
+        tft.setCursor(7, 233);
+        tft.print("CYD Power");
+
+        themeStaticDrawn = true;
+        minimalAnimInitialized = false;
+    }
+
+    // ---------- HEADER: actualizar solo cuando cambia ----------
+    String clock = uiClock12Text();
+    if (clock != uiLastMinimalClock) {
+        tft.fillRect(216, 3, 74, 22, bg);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, bg);
+        tft.setCursor(235, 8);
+        tft.print(clock);
+        uiLastMinimalClock = clock;
+    }
+
+    bool wifiOk = WiFi.status() == WL_CONNECTED;
+    String wifiSig = wifiOk ? "1" : "0";
+    if (wifiSig != uiLastMinimalWifi) {
+        tft.fillCircle(306, 10, 4, wifiOk ? green : red);
+        uiLastMinimalWifi = wifiSig;
+    }
+
+    // ---------- POTENCIA ----------
+    String power = themePower();
+    if (power != uiLastMinimalPower) {
+        tft.fillRect(14, 58, 182, 34, panel);
+        tft.setTextSize(3);
+        tft.setTextColor(text, panel);
+        tft.setCursor(14, 59);
+        tft.print(power);
+        uiLastMinimalPower = power;
+    }
+
+    // ---------- FUENTE ----------
+    String source = themeSourceName();
+    if (source == "RED ELECTRICA") source = "RED";
+    if (source.length() > 12) source = source.substring(0, 12);
+    if (source != uiLastMinimalSource) {
+        tft.fillRect(207, 53, 100, 14, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(themeSourceColor(), panel);
+        tft.setCursor(207, 55);
+        tft.print(source);
+        uiLastMinimalSource = source;
+    }
+
+    // ---------- TIEMPO EN FUENTE ----------
+    String timeInState = formatDuration(atsGetTimeInState());
+    if (timeInState != uiLastMinimalTime) {
+        tft.fillRect(207, 78, 100, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, panel);
+        tft.setCursor(207, 79);
+        tft.print(timeInState);
+        uiLastMinimalTime = timeInState;
+    }
+
+    // ---------- DATOS ELECTRICOS ----------
+    String voltage = themeVoltage();
+    if (voltage != uiLastMinimalVoltage) {
+        tft.fillRect(12, 125, 88, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, panel);
+        tft.setCursor(13, 126);
+        tft.print(voltage);
+        uiLastMinimalVoltage = voltage;
+    }
+
+    String current = themeCurrent();
+    if (current != uiLastMinimalCurrent) {
+        tft.fillRect(117, 125, 88, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(yellow, panel);
+        tft.setCursor(118, 126);
+        tft.print(current);
+        uiLastMinimalCurrent = current;
+    }
+
+    String freq = themeFrequency();
+    if (freq != uiLastMinimalFreq) {
+        tft.fillRect(222, 125, 88, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, panel);
+        tft.setCursor(223, 126);
+        tft.print(freq);
+        uiLastMinimalFreq = freq;
+    }
+
+    // ---------- IP ----------
+    String ip = wifiOk ? WiFi.localIP().toString() : "sin WiFi";
+    if (ip != uiLastMinimalIp) {
+        tft.fillRect(66, 231, 248, 8, bg);
+        tft.setTextSize(1);
+        tft.setTextColor(muted, bg);
+        tft.setCursor(66, 233);
+        tft.print(ip);
+        uiLastMinimalIp = ip;
+    }
+
+    // ---------- DISPOSITIVOS ----------
+    displayDrawDeviceListMinimal();
 }
 
 void themeDrawCyberpunk() {
@@ -2344,6 +2739,129 @@ void displayDrawDeviceListRetro() {
             tft.drawFastHLine(8, y + 26, 304, dim);
         }
     }
+}
+
+// Lista de dispositivos para el tema Minimalista.
+// Las columnas tienen posiciones fijas para impedir solapamientos:
+// nombre | W | V | A/estado.
+void displayDrawDeviceListMinimal() {
+    const int startX = 8;
+    const int startY = 159;
+    const int rowH = 15;
+    const int maxRows = 4;
+
+    struct RowData {
+        String name;
+        bool state;
+        bool hasEnergy;
+        bool metricsValid;
+        float power;
+        float voltage;
+        float current;
+    };
+
+    RowData rows[maxRows];
+    int rowCount = 0;
+    String signature = "";
+
+    if (devicesMutex != NULL) {
+        xSemaphoreTake(devicesMutex, portMAX_DELAY);
+        for (int i = 0; i < deviceCount && rowCount < maxRows; i++) {
+            if (devices[i].pollFailures != 0) continue;
+            rows[rowCount].name = devices[i].name;
+            rows[rowCount].state = devices[i].state;
+            rows[rowCount].hasEnergy = devices[i].hasEnergyMonitoring;
+            rows[rowCount].metricsValid = devices[i].metricsValid;
+            rows[rowCount].power = devices[i].lastPower;
+            rows[rowCount].voltage = devices[i].lastVoltage;
+            rows[rowCount].current = devices[i].lastCurrent;
+            signature += devices[i].name;
+            signature += rows[rowCount].state ? ":1" : ":0";
+            signature += ":" + String(rows[rowCount].power, 0);
+            signature += ":" + String(rows[rowCount].voltage, 0);
+            signature += ":" + String(rows[rowCount].current, 1);
+            signature += rows[rowCount].metricsValid ? ":M;" : ":N;";
+            rowCount++;
+        }
+        xSemaphoreGive(devicesMutex);
+    }
+
+    if (signature == uiLastMinimalDevices) return;
+    uiLastMinimalDevices = signature;
+
+    // Solo redibuja la zona de dispositivos cuando realmente cambia.
+    tft.fillRect(7, startY, 306, 64, UI_BG);
+
+    for (int i = 0; i < rowCount; i++) {
+        int y = startY + i * rowH;
+        uint16_t rowBg = (i % 2 == 0) ? 0x1082 : UI_BG;
+        tft.fillRect(7, y, 306, rowH - 1, rowBg);
+
+        tft.fillCircle(startX + 5, y + 5, 3, rows[i].state ? UI_GREEN : UI_ORANGE);
+
+        tft.setTextSize(1);
+        tft.setTextColor(0xFFFF, rowBg);
+        tft.setCursor(startX + 13, y + 2);
+        String nm = rows[i].name;
+        if (nm.length() > 15) nm = nm.substring(0, 14) + ".";
+        tft.print(nm);
+
+        if (rows[i].hasEnergy && rows[i].metricsValid) {
+            tft.setTextColor(0xFFE0, rowBg);
+            tft.setCursor(183, y + 2);
+            tft.print(String((int)round(rows[i].power)));
+            tft.print("W");
+
+            tft.setTextColor(0x07FF, rowBg);
+            tft.setCursor(225, y + 2);
+            tft.print(String(rows[i].voltage, 0));
+            tft.print("V");
+
+            tft.setCursor(267, y + 2);
+            tft.print(String(rows[i].current, 1));
+            tft.print("A");
+        } else {
+            tft.setTextColor(rows[i].state ? UI_GREEN : UI_RED, rowBg);
+            tft.setCursor(274, y + 2);
+            tft.print(rows[i].state ? "ON" : "OFF");
+        }
+    }
+
+    if (rowCount == 0) {
+        tft.setTextSize(1);
+        tft.setTextColor(UI_MUTED, UI_BG);
+        tft.setCursor(startX, startY + 2);
+        tft.print("Esperando dispositivos...");
+    }
+}
+
+// Animacion ligera para el tema Minimalista. No borra la pantalla ni toca
+// datos: una linea luminosa recorre el borde superior de la tarjeta de
+// potencia, dando sensacion de equipo vivo sin introducir parpadeo.
+void minimalAnimationTick() {
+    if (!displayInitialized || otaDisplayActive || currentTheme != THEME_MINIMAL || !themeStaticDrawn) return;
+
+    unsigned long now = millis();
+    if (now - minimalAnimLastMs < 70) return;
+    minimalAnimLastMs = now;
+
+    const uint16_t border = 0x07FF;
+    const uint16_t accent = 0xFFFF;
+    const int y = 36;
+    const int xMin = 10;
+    const int xMax = 300;
+    const int segment = 14;
+
+    if (minimalAnimInitialized) {
+        tft.drawFastHLine(minimalAnimX, y, segment, border);
+    } else {
+        minimalAnimInitialized = true;
+    }
+
+    minimalAnimX += 5;
+    if (minimalAnimX > xMax) minimalAnimX = xMin;
+
+    tft.drawFastHLine(minimalAnimX, y, segment, accent);
 }
 
 // Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
@@ -2674,6 +3192,9 @@ void webServerSetup() {
             if (upload.status == UPLOAD_FILE_START) {
                 Serial.printf("OTA Start: %s\n", upload.filename.c_str());
                 setLED(false, false, true);  // Blue = uploading
+                unsigned long expected = 0;
+                if (server.hasArg("size")) expected = server.arg("size").toInt();
+                otaDisplayBegin(upload.filename, expected);
                 if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                     Update.printError(Serial);
                 }
@@ -2681,35 +3202,17 @@ void webServerSetup() {
                 if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
                     Update.printError(Serial);
                 }
-                // Show progress on TFT
-                if (displayInitialized) {
-                    unsigned long pct = (upload.totalSize > 0)
-                        ? (upload.currentSize * 100 / upload.totalSize) : 0;
-                    tft.fillRect(10, 110, 300, 20, 0x18C3);
-                    tft.fillRect(10, 110, (300 * pct) / 100, 20, COLOR_CYAN);
-                    tft.setTextColor(COLOR_WHITE);
-                    tft.setTextSize(1);
-                    tft.setCursor(10, 113);
-                    tft.printf("OTA: %lu%%  %lu bytes", pct, upload.totalSize);
-                }
+                otaDisplayUpdate(upload.totalSize);
             } else if (upload.status == UPLOAD_FILE_END) {
                 if (Update.end(true)) {
                     Serial.printf("OTA Success: %u bytes\n", upload.totalSize);
                     setLED(false, true, false);  // Green = success
-                    if (displayInitialized) {
-                        tft.fillScreen(COLOR_BG);
-                        tft.setTextColor(COLOR_GREEN);
-                        tft.setTextSize(2);
-                        tft.setCursor(20, 80);
-                        tft.print("OTA exitoso!");
-                        tft.setTextColor(COLOR_WHITE);
-                        tft.setTextSize(1);
-                        tft.setCursor(20, 110);
-                        tft.print("Reiniciando...");
-                    }
+                    otaDisplayUpdate(upload.totalSize);
+                    otaDisplayComplete(true);
                 } else {
                     Update.printError(Serial);
                     setLED(true, false, false);  // Red = error
+                    otaDisplayComplete(false);
                 }
             }
         }
@@ -2925,6 +3428,7 @@ void loop() {
     
     // Refresh TFT display
     displayUpdate();
+    minimalAnimationTick();
     
     // Small yield to keep WiFi stack happy
     yield();
