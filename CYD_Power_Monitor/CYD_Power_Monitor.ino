@@ -2207,20 +2207,26 @@ void themeDrawMinimal() {
         tft.setTextColor(muted, panel);
         tft.setCursor(13, 113);  tft.print("VOLTAJE");
         tft.setCursor(118, 113); tft.print("CORRIENTE");
-        tft.setCursor(223, 113); tft.print("FUENTE");
+        tft.setCursor(223, 113); tft.print("FRECUENCIA");
 
-        // Barra independiente para el tiempo en la fuente.
-        tft.fillRoundRect(6, 147, 308, 18, 5, panel);
-        tft.drawRoundRect(6, 147, 308, 18, 5, 0x18C3);
+        // La fuente y el tiempo se integran dentro de la tarjeta de potencia.
+        // Asi liberamos espacio vertical para la lista de dispositivos.
         tft.setTextColor(muted, panel);
-        tft.setCursor(13, 152);
-        tft.print("EN FUENTE");
+        tft.setCursor(207, 44);
+        tft.print("FUENTE");
+        tft.setCursor(207, 55);
+        tft.setTextColor(orange, panel);
+        tft.print("GENERADOR");
+        tft.setTextColor(muted, panel);
+        tft.setCursor(207, 70);
+        tft.print("TIEMPO");
 
-        // Area de dispositivos.
+        // Area de dispositivos: ahora empieza mas arriba y dispone de
+        // mucho mas espacio vertical.
         tft.setTextColor(text, bg);
-        tft.setCursor(8, 169);
+        tft.setCursor(8, 147);
         tft.print("DISPOSITIVOS CONECTADOS");
-        tft.drawFastHLine(8, 178, 304, 0x18C3);
+        tft.drawFastHLine(8, 156, 304, 0x18C3);
 
         // Pie compacto: IP, sin quitar informacion de conexion.
         tft.drawFastHLine(0, 228, 320, 0x18C3);
@@ -2243,13 +2249,29 @@ void themeDrawMinimal() {
     bool wifiOk = WiFi.status() == WL_CONNECTED;
     tft.fillCircle(306, 10, 4, wifiOk ? green : red);
 
-    // Potencia grande en su propia zona.
-    tft.fillRect(14, 58, 292, 34, panel);
+    // Potencia grande a la izquierda; a la derecha quedan FUENTE y TIEMPO.
+    tft.fillRect(14, 58, 182, 34, panel);
     tft.setTextSize(3);
     tft.setTextColor(text, panel);
     String power = themePower();
     tft.setCursor(14, 59);
     tft.print(power);
+
+    // Fuente actual, junto a la potencia.
+    tft.fillRect(207, 53, 100, 14, panel);
+    tft.setTextSize(1);
+    tft.setTextColor(themeSourceColor(), panel);
+    String source = themeSourceName();
+    if (source == "RED ELECTRICA") source = "RED";
+    if (source.length() > 12) source = source.substring(0, 12);
+    tft.setCursor(207, 55);
+    tft.print(source);
+
+    // Tiempo en la fuente actual, debajo de la fuente.
+    tft.fillRect(207, 78, 100, 12, panel);
+    tft.setTextColor(cyan, panel);
+    tft.setCursor(207, 79);
+    tft.print(formatDuration(atsGetTimeInState()));
 
     // Valores electricos: siempre debajo de sus etiquetas.
     tft.fillRect(12, 125, 88, 12, panel);
@@ -2265,17 +2287,14 @@ void themeDrawMinimal() {
     tft.setCursor(118, 126);
     tft.print(themeCurrent());
 
-    tft.setTextColor(themeSourceColor(), panel);
-    tft.setCursor(223, 126);
-    String source = themeSourceName();
-    if (source == "RED ELECTRICA") source = "RED";
-    tft.print(source);
+    // La fuente y su tiempo ya se muestran junto a la potencia.
 
-    // Tiempo transcurrido en la fuente actual.
-    tft.fillRect(82, 150, 225, 13, panel);
-    tft.setTextColor(themeSourceColor(), panel);
-    tft.setCursor(82, 151);
-    tft.print(formatDuration(atsGetTimeInState()));
+    // La tercera tarjeta ahora muestra frecuencia, dejando FUENTE libre
+    // junto a la potencia y aprovechando mejor el espacio disponible.
+    tft.fillRect(222, 125, 88, 12, panel);
+    tft.setTextColor(cyan, panel);
+    tft.setCursor(223, 126);
+    tft.print(themeFrequency());
 
     // IP al pie.
     tft.fillRect(66, 231, 248, 8, bg);
@@ -2287,7 +2306,7 @@ void themeDrawMinimal() {
         tft.print("sin WiFi");
     }
 
-    // Lista dinamica: empieza despues del titulo, con filas compactas.
+    // Lista dinamica: empieza debajo del titulo reajustado.
     displayDrawDeviceListMinimal();
 }
 
@@ -2507,8 +2526,8 @@ void displayDrawDeviceListRetro() {
 // nombre | W | V | A/estado.
 void displayDrawDeviceListMinimal() {
     const int startX = 8;
-    const int startY = 181;
-    const int rowH = 11;
+    const int startY = 159;
+    const int rowH = 15;
     const int maxRows = 4;
 
     struct RowData {
@@ -2541,7 +2560,7 @@ void displayDrawDeviceListMinimal() {
     }
 
     // Limpia solamente las filas, nunca pisa el titulo ni el footer.
-    tft.fillRect(7, startY, 306, 46, UI_BG);
+    tft.fillRect(7, startY, 306, 64, UI_BG);
 
     for (int i = 0; i < rowCount; i++) {
         int y = startY + i * rowH;
