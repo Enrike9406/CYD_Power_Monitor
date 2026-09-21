@@ -811,6 +811,19 @@ static String uiLastUptime = "";
 static String uiLastWifi = "";
 static String uiLastIp = "";
 static String uiLastDeviceSignature = "";
+static String uiLastMinimalClock = "";
+static String uiLastMinimalSource = "";
+static String uiLastMinimalPower = "";
+static String uiLastMinimalVoltage = "";
+static String uiLastMinimalCurrent = "";
+static String uiLastMinimalFreq = "";
+static String uiLastMinimalTime = "";
+static String uiLastMinimalWifi = "";
+static String uiLastMinimalIp = "";
+static String uiLastMinimalDevices = "";
+static unsigned long minimalAnimLastMs = 0;
+static int minimalAnimX = 8;
+static bool minimalAnimInitialized = false;
 
 void uiResetDrawState() {
     uiStaticDrawn = false;
@@ -830,6 +843,19 @@ void uiResetDrawState() {
     uiLastWifi = "";
     uiLastIp = "";
     uiLastDeviceSignature = "";
+    uiLastMinimalClock = "";
+    uiLastMinimalSource = "";
+    uiLastMinimalPower = "";
+    uiLastMinimalVoltage = "";
+    uiLastMinimalCurrent = "";
+    uiLastMinimalFreq = "";
+    uiLastMinimalTime = "";
+    uiLastMinimalWifi = "";
+    uiLastMinimalIp = "";
+    uiLastMinimalDevices = "";
+    minimalAnimLastMs = 0;
+    minimalAnimX = 8;
+    minimalAnimInitialized = false;
 }
 
 void uiText(int x, int y, const String& text, uint16_t color, uint8_t size = 1) {
@@ -2159,9 +2185,8 @@ String uiClock12Text() {
 void themeDrawMinimal() {
     // ------------------------------------------------------------
     // MINIMALISTA - CYD POWER
-    // 320x240: distribucion fija para evitar cualquier solapamiento.
-    // No elimina la informacion existente; reorganiza y anade el
-    // tiempo transcurrido en la fuente actual.
+    // Render incremental: nunca redibuja toda la pantalla durante una
+    // actualizacion normal. Esto elimina el parpadeo visible del TFT.
     // ------------------------------------------------------------
     const uint16_t bg = 0x0000;
     const uint16_t panel = 0x0841;
@@ -2192,6 +2217,13 @@ void themeDrawMinimal() {
         tft.setCursor(15, 44);
         tft.print("POTENCIA ACTIVA");
 
+        // Fuente + tiempo dentro de la misma tarjeta.
+        tft.setTextColor(muted, panel);
+        tft.setCursor(207, 44);
+        tft.print("FUENTE");
+        tft.setCursor(207, 70);
+        tft.print("TIEMPO");
+
         // Tres tarjetas electricas.
         const int cardY = 106;
         const int cardW = 98;
@@ -2209,104 +2241,118 @@ void themeDrawMinimal() {
         tft.setCursor(118, 113); tft.print("CORRIENTE");
         tft.setCursor(223, 113); tft.print("FRECUENCIA");
 
-        // La fuente y el tiempo se integran dentro de la tarjeta de potencia.
-        // Asi liberamos espacio vertical para la lista de dispositivos.
-        tft.setTextColor(muted, panel);
-        tft.setCursor(207, 44);
-        tft.print("FUENTE");
-        tft.setCursor(207, 55);
-        tft.setTextColor(orange, panel);
-        tft.print("GENERADOR");
-        tft.setTextColor(muted, panel);
-        tft.setCursor(207, 70);
-        tft.print("TIEMPO");
-
-        // Area de dispositivos: ahora empieza mas arriba y dispone de
-        // mucho mas espacio vertical.
+        // Dispositivos.
         tft.setTextColor(text, bg);
         tft.setCursor(8, 147);
         tft.print("DISPOSITIVOS CONECTADOS");
         tft.drawFastHLine(8, 156, 304, 0x18C3);
 
-        // Pie compacto: IP, sin quitar informacion de conexion.
+        // Pie.
         tft.drawFastHLine(0, 228, 320, 0x18C3);
         tft.setTextColor(muted, bg);
         tft.setCursor(7, 233);
         tft.print("CYD Power");
 
         themeStaticDrawn = true;
+        minimalAnimInitialized = false;
     }
 
-    // Hora 12 h (AM/PM), reemplaza NET T2/6.
-    tft.fillRect(216, 3, 74, 22, bg);
-    tft.setTextSize(1);
-    tft.setTextColor(cyan, bg);
+    // ---------- HEADER: actualizar solo cuando cambia ----------
     String clock = uiClock12Text();
-    tft.setCursor(235, 8);
-    tft.print(clock);
+    if (clock != uiLastMinimalClock) {
+        tft.fillRect(216, 3, 74, 22, bg);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, bg);
+        tft.setCursor(235, 8);
+        tft.print(clock);
+        uiLastMinimalClock = clock;
+    }
 
-    // Indicador WiFi separado de la hora.
     bool wifiOk = WiFi.status() == WL_CONNECTED;
-    tft.fillCircle(306, 10, 4, wifiOk ? green : red);
+    String wifiSig = wifiOk ? "1" : "0";
+    if (wifiSig != uiLastMinimalWifi) {
+        tft.fillCircle(306, 10, 4, wifiOk ? green : red);
+        uiLastMinimalWifi = wifiSig;
+    }
 
-    // Potencia grande a la izquierda; a la derecha quedan FUENTE y TIEMPO.
-    tft.fillRect(14, 58, 182, 34, panel);
-    tft.setTextSize(3);
-    tft.setTextColor(text, panel);
+    // ---------- POTENCIA ----------
     String power = themePower();
-    tft.setCursor(14, 59);
-    tft.print(power);
+    if (power != uiLastMinimalPower) {
+        tft.fillRect(14, 58, 182, 34, panel);
+        tft.setTextSize(3);
+        tft.setTextColor(text, panel);
+        tft.setCursor(14, 59);
+        tft.print(power);
+        uiLastMinimalPower = power;
+    }
 
-    // Fuente actual, junto a la potencia.
-    tft.fillRect(207, 53, 100, 14, panel);
-    tft.setTextSize(1);
-    tft.setTextColor(themeSourceColor(), panel);
+    // ---------- FUENTE ----------
     String source = themeSourceName();
     if (source == "RED ELECTRICA") source = "RED";
     if (source.length() > 12) source = source.substring(0, 12);
-    tft.setCursor(207, 55);
-    tft.print(source);
-
-    // Tiempo en la fuente actual, debajo de la fuente.
-    tft.fillRect(207, 78, 100, 12, panel);
-    tft.setTextColor(cyan, panel);
-    tft.setCursor(207, 79);
-    tft.print(formatDuration(atsGetTimeInState()));
-
-    // Valores electricos: siempre debajo de sus etiquetas.
-    tft.fillRect(12, 125, 88, 12, panel);
-    tft.fillRect(117, 125, 88, 12, panel);
-    tft.fillRect(222, 125, 88, 12, panel);
-    tft.setTextSize(1);
-
-    tft.setTextColor(cyan, panel);
-    tft.setCursor(13, 126);
-    tft.print(themeVoltage());
-
-    tft.setTextColor(yellow, panel);
-    tft.setCursor(118, 126);
-    tft.print(themeCurrent());
-
-    // La fuente y su tiempo ya se muestran junto a la potencia.
-
-    // La tercera tarjeta ahora muestra frecuencia, dejando FUENTE libre
-    // junto a la potencia y aprovechando mejor el espacio disponible.
-    tft.fillRect(222, 125, 88, 12, panel);
-    tft.setTextColor(cyan, panel);
-    tft.setCursor(223, 126);
-    tft.print(themeFrequency());
-
-    // IP al pie.
-    tft.fillRect(66, 231, 248, 8, bg);
-    tft.setTextColor(muted, bg);
-    tft.setCursor(66, 233);
-    if (WiFi.status() == WL_CONNECTED) {
-        tft.print(WiFi.localIP());
-    } else {
-        tft.print("sin WiFi");
+    if (source != uiLastMinimalSource) {
+        tft.fillRect(207, 53, 100, 14, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(themeSourceColor(), panel);
+        tft.setCursor(207, 55);
+        tft.print(source);
+        uiLastMinimalSource = source;
     }
 
-    // Lista dinamica: empieza debajo del titulo reajustado.
+    // ---------- TIEMPO EN FUENTE ----------
+    String timeInState = formatDuration(atsGetTimeInState());
+    if (timeInState != uiLastMinimalTime) {
+        tft.fillRect(207, 78, 100, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, panel);
+        tft.setCursor(207, 79);
+        tft.print(timeInState);
+        uiLastMinimalTime = timeInState;
+    }
+
+    // ---------- DATOS ELECTRICOS ----------
+    String voltage = themeVoltage();
+    if (voltage != uiLastMinimalVoltage) {
+        tft.fillRect(12, 125, 88, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, panel);
+        tft.setCursor(13, 126);
+        tft.print(voltage);
+        uiLastMinimalVoltage = voltage;
+    }
+
+    String current = themeCurrent();
+    if (current != uiLastMinimalCurrent) {
+        tft.fillRect(117, 125, 88, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(yellow, panel);
+        tft.setCursor(118, 126);
+        tft.print(current);
+        uiLastMinimalCurrent = current;
+    }
+
+    String freq = themeFrequency();
+    if (freq != uiLastMinimalFreq) {
+        tft.fillRect(222, 125, 88, 12, panel);
+        tft.setTextSize(1);
+        tft.setTextColor(cyan, panel);
+        tft.setCursor(223, 126);
+        tft.print(freq);
+        uiLastMinimalFreq = freq;
+    }
+
+    // ---------- IP ----------
+    String ip = wifiOk ? WiFi.localIP().toString() : "sin WiFi";
+    if (ip != uiLastMinimalIp) {
+        tft.fillRect(66, 231, 248, 8, bg);
+        tft.setTextSize(1);
+        tft.setTextColor(muted, bg);
+        tft.setCursor(66, 233);
+        tft.print(ip);
+        uiLastMinimalIp = ip;
+    }
+
+    // ---------- DISPOSITIVOS ----------
     displayDrawDeviceListMinimal();
 }
 
@@ -2542,6 +2588,7 @@ void displayDrawDeviceListMinimal() {
 
     RowData rows[maxRows];
     int rowCount = 0;
+    String signature = "";
 
     if (devicesMutex != NULL) {
         xSemaphoreTake(devicesMutex, portMAX_DELAY);
@@ -2554,12 +2601,21 @@ void displayDrawDeviceListMinimal() {
             rows[rowCount].power = devices[i].lastPower;
             rows[rowCount].voltage = devices[i].lastVoltage;
             rows[rowCount].current = devices[i].lastCurrent;
+            signature += devices[i].name;
+            signature += rows[rowCount].state ? ":1" : ":0";
+            signature += ":" + String(rows[rowCount].power, 0);
+            signature += ":" + String(rows[rowCount].voltage, 0);
+            signature += ":" + String(rows[rowCount].current, 1);
+            signature += rows[rowCount].metricsValid ? ":M;" : ":N;";
             rowCount++;
         }
         xSemaphoreGive(devicesMutex);
     }
 
-    // Limpia solamente las filas, nunca pisa el titulo ni el footer.
+    if (signature == uiLastMinimalDevices) return;
+    uiLastMinimalDevices = signature;
+
+    // Solo redibuja la zona de dispositivos cuando realmente cambia.
     tft.fillRect(7, startY, 306, 64, UI_BG);
 
     for (int i = 0; i < rowCount; i++) {
@@ -2603,6 +2659,35 @@ void displayDrawDeviceListMinimal() {
         tft.setCursor(startX, startY + 2);
         tft.print("Esperando dispositivos...");
     }
+}
+
+// Animacion ligera para el tema Minimalista. No borra la pantalla ni toca
+// datos: una linea luminosa recorre el borde superior de la tarjeta de
+// potencia, dando sensacion de equipo vivo sin introducir parpadeo.
+void minimalAnimationTick() {
+    if (!displayInitialized || currentTheme != THEME_MINIMAL || !themeStaticDrawn) return;
+
+    unsigned long now = millis();
+    if (now - minimalAnimLastMs < 70) return;
+    minimalAnimLastMs = now;
+
+    const uint16_t border = 0x07FF;
+    const uint16_t accent = 0xFFFF;
+    const int y = 36;
+    const int xMin = 10;
+    const int xMax = 300;
+    const int segment = 14;
+
+    if (minimalAnimInitialized) {
+        tft.drawFastHLine(minimalAnimX, y, segment, border);
+    } else {
+        minimalAnimInitialized = true;
+    }
+
+    minimalAnimX += 5;
+    if (minimalAnimX > xMax) minimalAnimX = xMin;
+
+    tft.drawFastHLine(minimalAnimX, y, segment, accent);
 }
 
 // Lista de dispositivos con su consumo (o ON/OFF si no miden energia). Se
@@ -3184,6 +3269,7 @@ void loop() {
     
     // Refresh TFT display
     displayUpdate();
+    minimalAnimationTick();
     
     // Small yield to keep WiFi stack happy
     yield();
